@@ -1,0 +1,53 @@
+{
+  "binance": {
+    "current": {"openInterest": "10", "time": 900000},
+    "mark": {"markPrice": "2"},
+    "history": [
+      [
+        {"timestamp": 600000, "sumOpenInterest": "6", "sumOpenInterestValue": "6"},
+        {"timestamp": 900000, "sumOpenInterest": "9", "sumOpenInterestValue": "9"}
+      ],
+      [
+        {"timestamp": 300000, "sumOpenInterest": "3", "sumOpenInterestValue": "3"},
+        {"timestamp": 600000, "sumOpenInterest": "6", "sumOpenInterestValue": "6"}
+      ]
+    ]
+  },
+  "bybit": {
+    "ticker": {
+      "retCode": 0,
+      "time": 950000,
+      "result": {"list": [{"markPrice": "2", "openInterest": "9", "openInterestValue": "18"}]}
+    },
+    "history": [
+      {
+        "retCode": 0,
+        "result": {
+          "list": [
+            {"timestamp": "900000", "openInterest": "9"},
+            {"timestamp": "600000", "openInterest": "6"}
+          ],
+          "nextPageCursor": "next"
+        }
+      },
+      {
+        "retCode": 0,
+        "result": {
+          "list": [
+            {"timestamp": "600000", "openInterest": "6"},
+            {"timestamp": "300000", "openInterest": "3"}
+          ]
+        }
+      }
+    ]
+  },
+  "gate": {
+    "details": {"type": "direct", "position_size": "5", "quanto_multiplier": "0.1", "mark_price": "10"},
+    "history": [{"time": 300, "open_interest_usd": "8"}]
+  },
+  "okx": {"data": [{"oiUsd": "0", "oi": "0", "markPx": "2", "ts": "700000"}]},
+  "hyperliquid": [
+    {"universe": [{"name": "BASE-PERP"}]},
+    [{"openInterest": "4", "markPx": "2"}]
+  ]
+}
