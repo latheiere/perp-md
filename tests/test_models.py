@@ -19,7 +19,7 @@ def test_instrument_normalizes_venue_and_preserves_native_symbol():
     assert instrument.symbol == "Base_Quote"
 
 
-@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan"), "invalid"])
 def test_contract_multiplier_must_be_positive_and_finite(value):
     with pytest.raises(InvalidInstrument):
         Instrument("VENUE", "BASE-QUOTE", contract_multiplier=value)

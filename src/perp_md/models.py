@@ -48,7 +48,12 @@ class Instrument:
         object.__setattr__(self, "venue", venue)
         object.__setattr__(self, "symbol", symbol)
         if self.contract_multiplier is not None:
-            value = float(self.contract_multiplier)
+            try:
+                value = float(self.contract_multiplier)
+            except (TypeError, ValueError) as exc:
+                raise InvalidInstrument(
+                    "contract_multiplier must be finite and positive"
+                ) from exc
             if not math.isfinite(value) or value <= 0:
                 raise InvalidInstrument("contract_multiplier must be finite and positive")
             object.__setattr__(self, "contract_multiplier", value)
