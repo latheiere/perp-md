@@ -36,6 +36,9 @@
 `HttpxTransport` creates its `httpx.AsyncClient` on the first request. It owns
 global and per-host semaphores and a cache of in-flight or recent identical
 requests. `close` cancels unfinished cached requests and closes the HTTP client.
+Symbol-independent aggregate snapshots use one identical transport key, so
+concurrent instrument reads share the bounded request and parse their exact
+venue-native rows independently.
 
 `CcxtAdapter` imports CCXT on first fallback use, creates one exchange instance
 per venue, loads each venue catalog once, and closes all exchange instances on

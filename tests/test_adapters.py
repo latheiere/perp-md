@@ -10,8 +10,11 @@ import pytest
 from perp_md import (
     AdapterUnavailable,
     ContractDirection,
+    DataUnavailable,
     HistoryRange,
     Instrument,
+    InvalidResponse,
+    NativeUnit,
     OpenInterestClient,
     ValuationMethod,
 )
@@ -21,13 +24,24 @@ from perp_md.adapters.native import (
     BybitAdapter,
     GateAdapter,
     HyperliquidAdapter,
+    MexcAdapter,
     OkxAdapter,
 )
+from perp_md.transport import HttpxTransport
 import perp_md.adapters.native as native
 
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "native_open_interest.json").read_text()
+)
+MEXC_SUCCESS = json.loads(
+    (Path(__file__).parent / "fixtures" / "mexc_ticker_success.json").read_text()
+)
+MEXC_MALFORMED = json.loads(
+    (Path(__file__).parent / "fixtures" / "mexc_ticker_malformed.json").read_text()
+)
+MEXC_REJECTED = json.loads(
+    (Path(__file__).parent / "fixtures" / "mexc_ticker_rejected.json").read_text()
 )
 
 
@@ -190,6 +204,118 @@ def test_hyperliquid_resolves_exact_native_symbol():
         instrument("HYPERLIQUID", symbol="BASE-PERP"), None, include_history=False
     ))
     assert result.current.value_usd == 8
+
+
+def test_aggregate_contract_ticker_uses_exact_symbol_and_generic_linear_metadata():
+    async def handler(method, url, params):
+        return MEXC_SUCCESS
+
+    selected = MEXC_SUCCESS["data"][1]
+    transport = StubTransport(handler)
+    adapter = MexcAdapter(transport)
+    subject = instrument(
+        "MEXC",
+        symbol=selected["symbol"],
+        contract_multiplier=0.01,
+    )
+    result = asyncio.run(adapter.fetch(subject, None, include_history=True))
+
+    assert result.current.timestamp_ms == selected["timestamp"]
+    assert result.current.native_value == selected["holdVol"]
+    assert result.current.native_unit is NativeUnit.CONTRACTS
+    assert result.current.mark_price == selected["fairPrice"]
+    assert result.current.value_usd == pytest.approx(
+        selected["holdVol"] * 0.01 * selected["fairPrice"]
+    )
+    assert result.current.valuation is ValuationMethod.MARK_PRICE
+    assert result.history == ()
+    assert result.history_issue is None
+    assert transport.requests == [
+        ("GET", "https://contract.mexc.com/api/v1/contract/ticker", None)
+    ]
+
+    capabilities = adapter.capabilities(subject)
+    assert capabilities.current is True
+    assert capabilities.history is False
+    assert capabilities.required_metadata == (
+        "contract_direction",
+        "contract_multiplier",
+    )
+    registered = OpenInterestClient(transport=transport).capabilities(subject)
+    assert registered == capabilities
+
+
+@pytest.mark.parametrize("payload", [MEXC_MALFORMED, MEXC_REJECTED])
+def test_aggregate_contract_ticker_rejects_invalid_payloads(payload):
+    async def handler(method, url, params):
+        return payload
+
+    symbol = MEXC_MALFORMED["data"][0]["symbol"]
+    with pytest.raises(InvalidResponse):
+        asyncio.run(MexcAdapter(StubTransport(handler)).fetch(
+            instrument("MEXC", symbol=symbol), None, include_history=False
+        ))
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_aggregate_contract_ticker_requires_one_exact_instrument_match(ambiguous):
+    selected = MEXC_SUCCESS["data"][0]
+    payload = MEXC_SUCCESS
+    symbol = "ABSENT_NATIVE_SYMBOL"
+    if ambiguous:
+        payload = {**MEXC_SUCCESS, "data": [*MEXC_SUCCESS["data"], dict(selected)]}
+        symbol = selected["symbol"]
+
+    async def handler(method, url, params):
+        return payload
+
+    with pytest.raises(DataUnavailable):
+        asyncio.run(MexcAdapter(StubTransport(handler)).fetch(
+            instrument("MEXC", symbol=symbol), None, include_history=False
+        ))
+
+
+def test_concurrent_aggregate_contract_ticker_reads_share_one_request():
+    calls = 0
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return MEXC_SUCCESS
+
+    class Client:
+        async def get(self, url, params=None):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0)
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    async def scenario():
+        transport = HttpxTransport()
+        transport._http = Client()
+        adapter = MexcAdapter(transport)
+        subjects = [
+            instrument(
+                "MEXC",
+                symbol=row["symbol"],
+                contract_multiplier=multiplier,
+            )
+            for row, multiplier in zip(MEXC_SUCCESS["data"], (0.0001, 0.01))
+        ]
+        results = await asyncio.gather(*(
+            adapter.fetch(subject, None, include_history=False)
+            for subject in subjects
+        ))
+        await transport.close()
+        return results
+
+    assert len(asyncio.run(scenario())) == 2
+    assert calls == 1
 
 
 def test_client_requires_an_explicitly_available_adapter():

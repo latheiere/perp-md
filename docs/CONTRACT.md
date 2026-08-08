@@ -8,7 +8,16 @@ multipliers, separators, settlement suffixes, or other symbol components.
 
 Contract-count OI normalization requires explicit contract direction and
 multiplier. Missing required metadata produces `InvalidInstrument`, never a
-guessed conversion.
+guessed conversion. For a linear contract, `contract_multiplier` is canonical
+base units per contract and normalized value is contract count multiplied by
+the multiplier and contemporaneous positive mark. For an inverse contract,
+`contract_multiplier` is USD quote notional per contract and normalized value
+is contract count multiplied by the multiplier.
+
+An adapter reading a venue-wide aggregate response selects a row only by exact
+equality with `Instrument.symbol`. No matching row or multiple matching rows
+produce `DataUnavailable`; an invalid envelope, malformed row identity, or
+invalid required observation field produces `InvalidResponse`.
 
 ## Observations
 
@@ -43,7 +52,9 @@ silently truncate later available history.
 Capabilities report current and history availability, native history
 granularity, maximum lookback when known, and required instrument metadata.
 They describe adapter behavior, not caller configuration, storage coverage, or
-rate-limit feasibility.
+rate-limit feasibility. A current-only aggregate contract-ticker adapter
+reports `current=True`, `history=False`, and the generic contract fields needed
+to normalize venue-reported contract counts.
 
 ## Errors
 
