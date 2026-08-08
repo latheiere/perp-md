@@ -33,7 +33,10 @@ whether partial results are acceptable.
 
 History output is ordered by timestamp and deduplicated by timestamp. An
 explicit `HistoryRange` is inclusive at both endpoints. Adapters clamp ranges
-to documented venue retention and the latest complete native bucket.
+to documented venue retention and the latest complete native bucket. A paged
+adapter continues through a short response when source timestamps show that
+the requested range has not yet been traversed; sparse native buckets do not
+silently truncate later available history.
 
 ## Capabilities
 
