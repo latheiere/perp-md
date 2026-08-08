@@ -1,0 +1,13 @@
+{
+  "success": true,
+  "code": 0,
+  "data": [
+    {
+      "contractId": 10,
+      "symbol": "BTC_USDT",
+      "holdVol": 869214699,
+      "fairPrice": "not-a-number",
+      "timestamp": 1786223932882
+    }
+  ]
+}
