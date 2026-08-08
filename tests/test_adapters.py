@@ -132,6 +132,46 @@ def test_gate_current_includes_both_position_sides():
     assert result.history[0].value_usd == 8
 
 
+def test_gate_continues_after_a_short_sparse_history_page(monkeypatch):
+    pages = FIXTURE["gate"]["sparse_history"]
+    monkeypatch.setattr(native, "GATE_HISTORY_LIMIT", 3)
+
+    async def handler(method, url, params):
+        if url.endswith("contract_stats"):
+            return pages[0 if params["from"] == 300 else 1]
+        return FIXTURE["gate"]["details"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(GateAdapter(transport, lambda: 1_500.5).fetch(
+        instrument("GATE"), HistoryRange(300_000, 1_500_000), include_history=True
+    ))
+
+    assert [row.timestamp_ms for row in result.history] == [
+        300_000, 900_000, 1_200_000, 1_500_000,
+    ]
+    requests = [
+        params for _, url, params in transport.requests
+        if url.endswith("contract_stats")
+    ]
+    assert [row["from"] for row in requests] == [300, 901]
+
+
+def test_gate_malformed_history_preserves_current_observation():
+    async def handler(method, url, params):
+        if url.endswith("contract_stats"):
+            return FIXTURE["gate"]["malformed_history"]
+        return FIXTURE["gate"]["details"]
+
+    result = asyncio.run(GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
+        instrument("GATE"), HistoryRange(300_000, 900_000), include_history=True
+    ))
+
+    assert result.current.value_usd == 10
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+
+
 def test_okx_preserves_reported_zero():
     async def handler(method, url, params):
         return FIXTURE["okx"]

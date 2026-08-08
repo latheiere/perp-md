@@ -342,7 +342,10 @@ class GateAdapter(NativeAdapter):
                 if next_from <= timestamp <= end // 1000:
                     rows[timestamp] = item
             newest = int(page[-1]["time"])
-            if len(page) < int(base["limit"]) or newest * 1000 >= end:
+            # Statistics pages can omit native buckets and therefore contain
+            # fewer rows than the requested limit before the requested range
+            # has been traversed. Only the source timestamp proves completion.
+            if newest * 1000 >= end:
                 return [rows[key] for key in sorted(rows)]
             advanced = newest + 1
             if advanced <= next_from:

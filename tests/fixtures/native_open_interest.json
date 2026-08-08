@@ -43,7 +43,18 @@
   },
   "gate": {
     "details": {"type": "direct", "position_size": "5", "quanto_multiplier": "0.1", "mark_price": "10"},
-    "history": [{"time": 300, "open_interest_usd": "8"}]
+    "history": [{"time": 300, "open_interest_usd": "8"}],
+    "sparse_history": [
+      [
+        {"time": 300, "open_interest_usd": "3"},
+        {"time": 900, "open_interest_usd": "9"}
+      ],
+      [
+        {"time": 1200, "open_interest_usd": "12"},
+        {"time": 1500, "open_interest_usd": "15"}
+      ]
+    ],
+    "malformed_history": {"time": 300, "open_interest_usd": "8"}
   },
   "okx": {"data": [{"oiUsd": "0", "oi": "0", "markPx": "2", "ts": "700000"}]},
   "hyperliquid": [
