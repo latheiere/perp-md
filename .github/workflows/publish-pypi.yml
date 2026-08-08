@@ -1,0 +1,133 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag in strict vX.Y.Z form
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_NAME: perp-md
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build exact release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate requested release tag
+        shell: bash
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must use strict vX.Y.Z form" >&2
+            exit 1
+          fi
+
+      - name: Check out exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          git fetch --no-tags origin "refs/heads/main:refs/remotes/origin/main"
+          git merge-base --is-ancestor HEAD origin/main
+          project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "v${project_version}" = "${RELEASE_TAG}"
+
+      - name: Verify dispatched tag has a public GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          release_is_public="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '(.draft == false and .prerelease == false)')"
+          test "${release_is_public}" = "true"
+
+      - name: Refuse an existing PyPI version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          project = urllib.parse.quote(os.environ["PROJECT_NAME"], safe="")
+          version = urllib.parse.quote(os.environ["RELEASE_TAG"].removeprefix("v"), safe="")
+          url = f"https://pypi.org/pypi/{project}/{version}/json"
+          request = urllib.request.Request(url, headers={"User-Agent": "perp-md-release-check"})
+          try:
+              urllib.request.urlopen(request, timeout=15).close()
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  raise SystemExit(0) from exc
+              raise
+          raise SystemExit(f"{os.environ['PROJECT_NAME']} {version} is already published")
+          PY
+
+      - name: Install package tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+
+      - name: Preserve distributions for isolated publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish trusted distributions
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/perp-md
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Retrieve validated distributions
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: python-distributions
+          path: dist
+
+      - name: Publish distributions with attestations
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+          attestations: true
+          skip-existing: false
+          print-hash: true
+          verbose: true
