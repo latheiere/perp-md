@@ -26,6 +26,7 @@ from perp_md.adapters.native import (
     BybitAdapter,
     GateAdapter,
     HyperliquidAdapter,
+    KrakenAdapter,
     MexcAdapter,
     OkxAdapter,
 )
@@ -51,6 +52,9 @@ CCXT_HOURLY = json.loads(
 )
 HYPERLIQUID_CONTEXTS = json.loads(
     (Path(__file__).parent / "fixtures" / "hyperliquid_meta_contexts.json").read_text()
+)
+KRAKEN_OPEN_INTEREST = json.loads(
+    (Path(__file__).parent / "fixtures" / "kraken_open_interest.json").read_text()
 )
 
 
@@ -494,6 +498,391 @@ def test_concurrent_aggregate_contract_ticker_reads_share_one_request():
 
     assert len(asyncio.run(scenario())) == 2
     assert calls == 1
+
+
+def test_aggregate_base_unit_ticker_uses_response_time_and_exact_symbol():
+    async def handler(method, url, params):
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    selected = KRAKEN_OPEN_INTEREST["tickers"]["tickers"][1]
+    transport = StubTransport(handler)
+    adapter = KrakenAdapter(transport)
+    subject = instrument(
+        "KRAKEN",
+        symbol=selected["symbol"],
+        contract_multiplier=None,
+    )
+    result = asyncio.run(adapter.fetch(subject, None, include_history=False))
+
+    assert result.current.timestamp_ms == 1_767_323_045_678
+    assert result.current.native_value == float(selected["openInterest"])
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.mark_price == float(selected["markPrice"])
+    assert result.current.value_usd == pytest.approx(50)
+    assert result.current.valuation is ValuationMethod.MARK_PRICE
+    assert result.current.timestamp_ms != selected["lastTime"]
+    assert transport.requests == [
+        ("GET", "https://futures.kraken.com/derivatives/api/v3/tickers", None)
+    ]
+
+    capabilities = adapter.capabilities(subject)
+    assert capabilities.current is True
+    assert capabilities.history is True
+    assert capabilities.history_interval_seconds == 300
+    assert capabilities.max_history_days == 6
+    assert capabilities.required_metadata == ("contract_direction",)
+    registered = OpenInterestClient(transport=transport).capabilities(subject)
+    assert registered == capabilities
+
+
+def test_aggregate_inverse_ticker_uses_quote_notional_multiplier():
+    async def handler(method, url, params):
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    selected = KRAKEN_OPEN_INTEREST["tickers"]["tickers"][2]
+    subject = instrument(
+        "KRAKEN",
+        symbol=selected["symbol"],
+        settlement_currency="BASE",
+        contract_direction=ContractDirection.INVERSE,
+        contract_multiplier=100,
+    )
+    adapter = KrakenAdapter(StubTransport(handler))
+    result = asyncio.run(adapter.fetch(subject, None, include_history=False))
+
+    assert result.current.native_value == 3
+    assert result.current.native_unit is NativeUnit.CONTRACTS
+    assert result.current.value_usd == 300
+    assert result.current.mark_price == 200
+    assert result.current.valuation is ValuationMethod.CONTRACT_VALUE
+    assert adapter.capabilities(subject).required_metadata == (
+        "contract_direction",
+        "contract_multiplier",
+    )
+
+
+@pytest.mark.parametrize(
+    "reported_mark",
+    [None, "", "0", "-1"],
+    ids=["missing", "empty", "zero", "negative"],
+)
+def test_aggregate_inverse_ticker_does_not_require_a_positive_mark(reported_mark):
+    payload = json.loads(json.dumps(KRAKEN_OPEN_INTEREST["tickers"]))
+    selected = payload["tickers"][2]
+    if reported_mark is None:
+        selected.pop("markPrice")
+    else:
+        selected["markPrice"] = reported_mark
+
+    async def handler(method, url, params):
+        return payload
+
+    result = asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
+        instrument(
+            "KRAKEN",
+            symbol=selected["symbol"],
+            settlement_currency="BASE",
+            contract_direction=ContractDirection.INVERSE,
+            contract_multiplier=100,
+        ),
+        None,
+        include_history=False,
+    ))
+
+    assert result.current.native_value == 3
+    assert result.current.value_usd == 300
+    assert result.current.mark_price is None
+    assert result.current.valuation is ValuationMethod.CONTRACT_VALUE
+
+
+@pytest.mark.parametrize(
+    "direction",
+    [None, "linear"],
+    ids=["missing", "untyped"],
+)
+def test_aggregate_mixed_unit_ticker_requires_typed_contract_direction(direction):
+    async def handler(method, url, params):
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    with pytest.raises(InvalidInstrument):
+        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "KRAKEN",
+                symbol="PF_LINEAR",
+                contract_direction=direction,
+            ),
+            None,
+            include_history=False,
+        ))
+
+
+def test_aggregate_inverse_ticker_requires_contract_multiplier_before_request():
+    transport = StubTransport(None)
+    with pytest.raises(InvalidInstrument):
+        asyncio.run(KrakenAdapter(transport).fetch(
+            instrument(
+                "KRAKEN",
+                symbol="PI_INVERSE",
+                settlement_currency="BASE",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=None,
+            ),
+            None,
+            include_history=False,
+        ))
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.update(result="error"),
+        lambda payload: payload.pop("tickers"),
+        lambda payload: payload["tickers"].append({"symbol": None}),
+        lambda payload: payload.pop("serverTime"),
+        lambda payload: payload.update(serverTime="not-a-time"),
+        lambda payload: payload["tickers"][1].pop("openInterest"),
+        lambda payload: payload["tickers"][1].update(markPrice="0"),
+    ],
+    ids=[
+        "rejected-envelope",
+        "missing-rows",
+        "malformed-row-identity",
+        "missing-source-time",
+        "malformed-source-time",
+        "missing-open-interest",
+        "non-positive-mark",
+    ],
+)
+def test_aggregate_mixed_unit_ticker_rejects_invalid_payloads(mutate):
+    payload = json.loads(json.dumps(KRAKEN_OPEN_INTEREST["tickers"]))
+    mutate(payload)
+
+    async def handler(method, url, params):
+        return payload
+
+    with pytest.raises(InvalidResponse):
+        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "KRAKEN",
+                symbol="PF_LINEAR",
+                contract_multiplier=None,
+            ),
+            None,
+            include_history=False,
+        ))
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_aggregate_mixed_unit_ticker_requires_one_exact_instrument_match(ambiguous):
+    payload = json.loads(json.dumps(KRAKEN_OPEN_INTEREST["tickers"]))
+    symbol = "ABSENT_NATIVE_SYMBOL"
+    if ambiguous:
+        selected = payload["tickers"][1]
+        payload["tickers"].append(dict(selected))
+        symbol = selected["symbol"]
+
+    async def handler(method, url, params):
+        return payload
+
+    with pytest.raises(DataUnavailable):
+        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "KRAKEN",
+                symbol=symbol,
+                contract_multiplier=None,
+            ),
+            None,
+            include_history=False,
+        ))
+
+
+def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
+    analytics = KRAKEN_OPEN_INTEREST["analytics_pages"]
+    marks = KRAKEN_OPEN_INTEREST["mark_pages"]
+
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            return analytics[0 if params["since"] == 300 else 1]
+        if "/mark/" in url:
+            return marks[0 if params["from"] == 300 else 1]
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(KrakenAdapter(transport, lambda: 1_200.5).fetch(
+        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+        HistoryRange(300_000, 900_000),
+        include_history=True,
+    ))
+
+    assert [row.timestamp_ms for row in result.history] == [
+        300_000,
+        600_000,
+        900_000,
+    ]
+    assert [row.native_value for row in result.history] == [1, 2, 3]
+    assert [row.mark_price for row in result.history] == [2, 4, 6]
+    assert [row.value_usd for row in result.history] == [2, 8, 18]
+    assert all(row.native_unit is NativeUnit.BASE for row in result.history)
+    assert all(row.valuation is ValuationMethod.MARK_PRICE for row in result.history)
+    assert result.history_issue is None
+
+    analytics_requests = [
+        params for _, url, params in transport.requests if url.endswith("/open-interest")
+    ]
+    assert [row["since"] for row in analytics_requests] == [300, 900]
+    assert all(row["to"] == 900 for row in analytics_requests)
+    assert all(row["interval"] == 300 for row in analytics_requests)
+    mark_requests = [
+        params for _, url, params in transport.requests if "/mark/" in url
+    ]
+    assert [row["from"] for row in mark_requests] == [300, 900]
+    assert all(row["to"] == 900 for row in mark_requests)
+
+
+def test_contract_count_history_uses_multiplier_without_mark_requests():
+    analytics = KRAKEN_OPEN_INTEREST["analytics_pages"]
+
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            return analytics[0 if params["since"] == 300 else 1]
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(KrakenAdapter(transport, lambda: 1_200.5).fetch(
+        instrument(
+            "KRAKEN",
+            symbol="PI_INVERSE",
+            settlement_currency="BASE",
+            contract_direction=ContractDirection.INVERSE,
+            contract_multiplier=100,
+        ),
+        HistoryRange(300_000, 900_000),
+        include_history=True,
+    ))
+
+    assert [row.native_value for row in result.history] == [1, 2, 3]
+    assert [row.value_usd for row in result.history] == [100, 200, 300]
+    assert all(row.native_unit is NativeUnit.CONTRACTS for row in result.history)
+    assert all(row.mark_price is None for row in result.history)
+    assert all(row.valuation is ValuationMethod.CONTRACT_VALUE for row in result.history)
+    assert not any("/mark/" in url for _, url, _ in transport.requests)
+
+
+def test_base_unit_history_reports_missing_exact_mark_joins_as_partial():
+    analytics = {
+        **KRAKEN_OPEN_INTEREST["analytics_pages"][0],
+        "result": {
+            **KRAKEN_OPEN_INTEREST["analytics_pages"][0]["result"],
+            "timestamp": [300, 600, 900],
+            "data": [
+                ["0.5", "1.25", "0.25", "1"],
+                ["1", "2.5", "0.75", "2"],
+                ["2", "3.5", "1.5", "3"],
+            ],
+            "more": False,
+        },
+    }
+
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            return analytics
+        if "/mark/" in url:
+            return KRAKEN_OPEN_INTEREST["partial_marks"]
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
+        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+        HistoryRange(300_000, 900_000),
+        include_history=True,
+    ))
+
+    assert [row.timestamp_ms for row in result.history] == [300_000, 900_000]
+    assert [row.value_usd for row in result.history] == [2, 18]
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_partial"
+    assert "1 of 3" in result.history_issue.message
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["malformed_analytics", "misaligned_analytics"],
+)
+def test_malformed_analytics_history_preserves_current_observation(fixture_name):
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            return KRAKEN_OPEN_INTEREST[fixture_name]
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 600.5).fetch(
+        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+        HistoryRange(300_000, 300_000),
+        include_history=True,
+    ))
+
+    assert result.current.value_usd == 50
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+    assert "InvalidResponse" in result.history_issue.message
+
+
+def test_history_pagination_bound_preserves_current_observation(monkeypatch):
+    monkeypatch.setattr(native, "HISTORY_MAX_PAGES", 1)
+
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            return KRAKEN_OPEN_INTEREST["analytics_pages"][0]
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
+        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+        HistoryRange(300_000, 900_000),
+        include_history=True,
+    ))
+
+    assert result.current.value_usd == 50
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+    assert "PaginationError" in result.history_issue.message
+
+
+def test_history_lookback_is_clamped_below_native_page_ceiling():
+    six_days_ms = 6 * 86_400_000
+    clock_ms = 10 * six_days_ms
+    current_bucket = clock_ms // 300_000 * 300_000
+    latest_complete = current_bucket - 300_000
+    expected_start = latest_complete - six_days_ms + 300_000
+
+    async def handler(method, url, params):
+        if url.endswith("/open-interest"):
+            assert params == {
+                "since": expected_start // 1000,
+                "to": latest_complete // 1000,
+                "interval": 300,
+            }
+            return {"result": {"timestamp": [], "data": [], "more": False}, "errors": []}
+        if "/mark/" in url:
+            assert params == {
+                "from": expected_start // 1000,
+                "to": latest_complete // 1000,
+            }
+            return {"candles": [], "more_candles": False}
+        return KRAKEN_OPEN_INTEREST["tickers"]
+
+    result = asyncio.run(KrakenAdapter(
+        StubTransport(handler),
+        lambda: clock_ms / 1000,
+    ).fetch(
+        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+        HistoryRange(0, latest_complete),
+        include_history=True,
+    ))
+
+    assert result.history == ()
+    assert result.history_issue is None
+    assert (latest_complete - expected_start) // 300_000 + 1 == 1_728
 
 
 def test_client_requires_an_explicitly_available_adapter():

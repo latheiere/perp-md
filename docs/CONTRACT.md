@@ -30,6 +30,15 @@ equality with `Instrument.symbol`. No matching row or multiple matching rows
 produce `DataUnavailable`; an invalid envelope, malformed row identity, or
 invalid required observation field produces `InvalidResponse`.
 
+For aggregate derivative tickers that publish base-unit OI for linear
+contracts and contract-count OI for inverse contracts, callers provide an
+explicit contract direction. Linear observations are normalized with the
+source mark price. Inverse observations additionally require the published
+quote-notional contract multiplier. A valid positive inverse mark is retained
+when available but does not gate contract-value normalization. Current
+observations use the aggregate response timestamp rather than the last-trade
+time of an individual market.
+
 ## Observations
 
 `OpenInterestObservation` contains:
@@ -57,6 +66,15 @@ to documented venue retention and the latest complete native bucket. A paged
 adapter continues through a short response when source timestamps show that
 the requested range has not yet been traversed; sparse native buckets do not
 silently truncate later available history.
+
+When a five-minute analytics protocol publishes OI as four-value OHLC tuples,
+the adapter validates the complete tuple and uses its close. Linear-contract
+history is joined to mark-price candles only on exact source timestamps. A
+missing corresponding mark omits that unprovable USD observation and produces
+a `history_partial` issue while preserving every exactly matched observation.
+The supported lookback for this protocol is conservatively bounded to six
+whole days, which fits below the per-response record ceiling for both OI and
+marks at five-minute cadence.
 
 Optional-provider adapters request a venue-supported native history cadence,
 and capability intervals describe that requested cadence. A documented
