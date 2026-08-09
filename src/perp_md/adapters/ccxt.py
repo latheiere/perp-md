@@ -34,6 +34,10 @@ DEFAULT_EXCHANGE_IDS = {
     "XT": "xt",
 }
 
+HTX_HISTORY_INTERVAL_SECONDS = 3_600
+HTX_HISTORY_LIMIT = 200
+HTX_MAX_HISTORY_DAYS = 8
+
 
 @dataclass
 class CcxtAdapter:
@@ -47,7 +51,17 @@ class CcxtAdapter:
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
         required = ("contract_direction", "contract_multiplier") if instrument.venue in {"BITFINEX", "BITGET", "COINBASE", "WHITEBIT"} else ()
-        return OpenInterestCapabilities(True, instrument.venue in {"HTX", "OKX"}, 300, required_metadata=required)
+        if instrument.venue == "HTX":
+            return OpenInterestCapabilities(
+                True,
+                True,
+                HTX_HISTORY_INTERVAL_SECONDS,
+                HTX_MAX_HISTORY_DAYS,
+                required,
+            )
+        if instrument.venue == "OKX":
+            return OpenInterestCapabilities(True, True, 300, required_metadata=required)
+        return OpenInterestCapabilities(True, False, required_metadata=required)
 
     async def fetch(
         self,
@@ -84,28 +98,48 @@ class CcxtAdapter:
                 mark,
                 valuation,
             )
-            if not include_history or not exchange.has.get("fetchOpenInterestHistory"):
+            if not include_history:
+                return OpenInterestResult(current)
+            if not exchange.has.get("fetchOpenInterestHistory"):
+                if self.capabilities(instrument).history:
+                    return OpenInterestResult(
+                        current,
+                        history_issue=HistoryIssue(
+                            "history_unavailable",
+                            "venue runtime does not expose open-interest history",
+                        ),
+                    )
                 return OpenInterestResult(current)
             try:
+                timeframe = "1h" if instrument.venue == "HTX" else "5m"
+                limit = HTX_HISTORY_LIMIT if instrument.venue == "HTX" else 100
                 rows = await exchange.fetch_open_interest_history(
                     symbol,
-                    timeframe="5m",
+                    timeframe=timeframe,
                     since=history.start_ms if history else None,
-                    limit=100,
+                    limit=limit,
                 )
+                if not isinstance(rows, list):
+                    raise InvalidResponse("venue returned an invalid open-interest history")
+                start = history.start_ms if history else None
                 end = history.end_ms if history else None
-                observations = tuple(
-                    OpenInterestObservation(
-                        int(row["timestamp"]),
-                        number(row["openInterestValue"]),
-                        valuation=ValuationMethod.VENUE_REPORTED,
-                    )
-                    for row in rows
-                    if row.get("timestamp") is not None
-                    and row.get("openInterestValue") is not None
-                    and (end is None or int(row["timestamp"]) <= end)
+                observations: dict[int, OpenInterestObservation] = {}
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise InvalidResponse("venue returned an invalid open-interest history row")
+                    if row.get("timestamp") is None or row.get("openInterestValue") is None:
+                        raise InvalidResponse("venue omitted a required open-interest history field")
+                    timestamp = int(row["timestamp"])
+                    if (start is None or timestamp >= start) and (end is None or timestamp <= end):
+                        observations[timestamp] = OpenInterestObservation(
+                            timestamp,
+                            number(row["openInterestValue"]),
+                            valuation=ValuationMethod.VENUE_REPORTED,
+                        )
+                return OpenInterestResult(
+                    current,
+                    tuple(sorted(observations.values(), key=lambda row: row.timestamp_ms)),
                 )
-                return OpenInterestResult(current, tuple(sorted(observations, key=lambda row: row.timestamp_ms)))
             except Exception as exc:
                 return OpenInterestResult(current, history_issue=HistoryIssue(
                     "history_unavailable", self._summary(exc)

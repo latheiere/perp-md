@@ -1,0 +1,32 @@
+{
+  "market_id": "BTC-USDT",
+  "symbol": "BTC/USDT:USDT",
+  "current": {
+    "symbol": "BTC/USDT:USDT",
+    "openInterestAmount": 32191881.0,
+    "openInterestValue": 2088351704.232,
+    "timestamp": 1786264653992
+  },
+  "history": [
+    {
+      "symbol": "BTC/USDT:USDT",
+      "openInterestAmount": 32196.538,
+      "openInterestValue": 2088653813.136,
+      "timestamp": 1786258800000
+    },
+    {
+      "symbol": "BTC/USDT:USDT",
+      "openInterestAmount": 32197.781,
+      "openInterestValue": 2088734449.032,
+      "timestamp": 1786262400000
+    }
+  ],
+  "malformed_history": [
+    {
+      "symbol": "BTC/USDT:USDT",
+      "openInterestAmount": 32196.538,
+      "openInterestValue": "invalid",
+      "timestamp": 1786258800000
+    }
+  ]
+}

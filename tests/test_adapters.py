@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,12 +14,13 @@ from perp_md import (
     DataUnavailable,
     HistoryRange,
     Instrument,
+    InvalidInstrument,
     InvalidResponse,
     NativeUnit,
     OpenInterestClient,
     ValuationMethod,
 )
-from perp_md.adapters.ccxt import resolve_ccxt_symbol
+from perp_md.adapters.ccxt import CcxtAdapter, resolve_ccxt_symbol
 from perp_md.adapters.native import (
     BinanceAdapter,
     BybitAdapter,
@@ -29,6 +31,7 @@ from perp_md.adapters.native import (
 )
 from perp_md.transport import HttpxTransport
 import perp_md.adapters.native as native
+import perp_md.adapters.ccxt as ccxt_adapter_module
 
 
 FIXTURE = json.loads(
@@ -42,6 +45,12 @@ MEXC_MALFORMED = json.loads(
 )
 MEXC_REJECTED = json.loads(
     (Path(__file__).parent / "fixtures" / "mexc_ticker_rejected.json").read_text()
+)
+CCXT_HOURLY = json.loads(
+    (Path(__file__).parent / "fixtures" / "ccxt_hourly_open_interest.json").read_text()
+)
+HYPERLIQUID_CONTEXTS = json.loads(
+    (Path(__file__).parent / "fixtures" / "hyperliquid_meta_contexts.json").read_text()
 )
 
 
@@ -57,6 +66,38 @@ class StubTransport:
     async def post(self, url, payload):
         self.requests.append(("POST", url, payload))
         return await self.handler("POST", url, payload)
+
+    async def close(self):
+        return None
+
+
+class StubCcxtExchange:
+    def __init__(self, history, *, supports_history=True):
+        self.has = {
+            "fetchOpenInterest": True,
+            "fetchOpenInterestHistory": supports_history,
+        }
+        self.markets_by_id = {
+            CCXT_HOURLY["market_id"]: [{
+                "symbol": CCXT_HOURLY["symbol"],
+                "contract": True,
+            }]
+        }
+        self.history = history
+        self.history_requests: list[dict[str, Any]] = []
+
+    async def fetch_open_interest(self, symbol):
+        assert symbol == CCXT_HOURLY["symbol"]
+        return CCXT_HOURLY["current"]
+
+    async def fetch_open_interest_history(self, symbol, *, timeframe, since, limit):
+        self.history_requests.append({
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "since": since,
+            "limit": limit,
+        })
+        return self.history
 
     async def close(self):
         return None
@@ -196,14 +237,151 @@ def test_okx_preserves_reported_zero():
     assert result.current.value_usd == 0
 
 
-def test_hyperliquid_resolves_exact_native_symbol():
-    async def handler(method, url, params):
-        return FIXTURE["hyperliquid"]
+@pytest.mark.parametrize("product", [None, "PERP"], ids=["no-product", "ordinary-product"])
+def test_default_perpetual_universe_retains_unscoped_request_behavior(product):
+    payload = HYPERLIQUID_CONTEXTS["default_success"]
 
-    result = asyncio.run(HyperliquidAdapter(StubTransport(handler), lambda: 1).fetch(
-        instrument("HYPERLIQUID", symbol="BASE-PERP"), None, include_history=False
+    async def handler(method, url, params):
+        return payload
+
+    transport = StubTransport(handler)
+    adapter = HyperliquidAdapter(transport, lambda: 1)
+    subject = instrument(
+        "HYPERLIQUID",
+        symbol=payload[0]["universe"][0]["name"],
+        product=product,
+    )
+    result = asyncio.run(adapter.fetch(
+        subject, None, include_history=False
     ))
-    assert result.current.value_usd == 8
+
+    context = payload[1][0]
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.value_usd == pytest.approx(
+        float(context["openInterest"]) * float(context["markPx"])
+    )
+    assert transport.requests == [
+        ("POST", "https://api.hyperliquid.xyz/info", {"type": "metaAndAssetCtxs"})
+    ]
+    capabilities = adapter.capabilities(subject)
+    assert capabilities.current is True
+    assert capabilities.history is False
+
+
+@pytest.mark.parametrize(
+    ("symbol_form", "product_form"),
+    [
+        ("qualified", None),
+        ("local", "descriptor"),
+        ("qualified", "descriptor"),
+    ],
+    ids=[
+        "symbol-namespace",
+        "prefixed-product-descriptor",
+        "matching-symbol-and-product",
+    ],
+)
+def test_scoped_perpetual_universe_uses_native_identity(symbol_form, product_form):
+    payload = HYPERLIQUID_CONTEXTS["scoped_success"]
+    qualified_symbol = payload[0]["universe"][0]["name"]
+    scope, local_symbol = qualified_symbol.split(":", 1)
+
+    async def handler(method, url, params):
+        return payload
+
+    transport = StubTransport(handler)
+    product = None
+    if product_form == "descriptor":
+        product = f"HIP-3:{scope}"
+    subject = instrument(
+        "HYPERLIQUID",
+        symbol=qualified_symbol if symbol_form == "qualified" else local_symbol,
+        product=product,
+    )
+    result = asyncio.run(HyperliquidAdapter(transport, lambda: 1).fetch(
+        subject, None, include_history=False
+    ))
+
+    context = payload[1][0]
+    assert result.current.native_value == float(context["openInterest"])
+    assert result.current.mark_price == float(context["markPx"])
+    assert transport.requests == [
+        (
+            "POST",
+            "https://api.hyperliquid.xyz/info",
+            {"type": "metaAndAssetCtxs", "dex": scope},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "error"),
+    [("malformed", InvalidResponse), ("absent", DataUnavailable)],
+)
+def test_perpetual_universe_rejects_malformed_or_absent_observations(fixture_name, error):
+    payload = HYPERLIQUID_CONTEXTS[fixture_name]
+
+    async def handler(method, url, params):
+        return payload
+
+    symbol = (
+        payload[0]["universe"][0]["name"]
+        if fixture_name == "malformed"
+        else "ABSENT_NATIVE_SYMBOL"
+    )
+    with pytest.raises(error):
+        asyncio.run(HyperliquidAdapter(StubTransport(handler), lambda: 1).fetch(
+            instrument("HYPERLIQUID", symbol=symbol), None, include_history=False
+        ))
+
+
+def test_scoped_perpetual_identity_rejects_conflicting_native_scope():
+    payload = HYPERLIQUID_CONTEXTS["scoped_success"]
+    qualified_symbol = payload[0]["universe"][0]["name"]
+
+    with pytest.raises(InvalidInstrument):
+        asyncio.run(HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
+            instrument(
+                "HYPERLIQUID",
+                symbol=qualified_symbol,
+                product="HIP-3:conflicting-scope",
+            ),
+            None,
+            include_history=False,
+        ))
+
+
+@pytest.mark.parametrize(
+    "product_template",
+    [
+        "",
+        "HIP-3",
+        "HIP-3:",
+        "HIP-3:{scope}:extra",
+        "OTHER:{scope}",
+        " {scope}",
+    ],
+    ids=[
+        "empty",
+        "missing-descriptor-scope",
+        "empty-descriptor-scope",
+        "multi-part-descriptor-scope",
+        "unsupported-descriptor-family",
+        "whitespace",
+    ],
+)
+def test_scoped_perpetual_identity_rejects_malformed_product(product_template):
+    payload = HYPERLIQUID_CONTEXTS["scoped_success"]
+    qualified_symbol = payload[0]["universe"][0]["name"]
+    scope, local_symbol = qualified_symbol.split(":", 1)
+    product = product_template.format(scope=scope)
+
+    with pytest.raises(InvalidInstrument):
+        asyncio.run(HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
+            instrument("HYPERLIQUID", symbol=local_symbol, product=product),
+            None,
+            include_history=False,
+        ))
 
 
 def test_aggregate_contract_ticker_uses_exact_symbol_and_generic_linear_metadata():
@@ -329,3 +507,88 @@ def test_ccxt_symbol_resolution_requires_a_unique_contract():
         markets_by_id = {"BASEQUOTE": [{"symbol": "BASE/QUOTE:QUOTE", "contract": True}]}
 
     assert resolve_ccxt_symbol(Exchange(), instrument("VENUE")) == "BASE/QUOTE:QUOTE"
+
+
+def configured_ccxt_adapter(monkeypatch, exchange):
+    monkeypatch.setattr(
+        ccxt_adapter_module.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(htx=object),
+    )
+    adapter = CcxtAdapter()
+    adapter.exchanges["HTX"] = exchange
+    return adapter
+
+
+def test_ccxt_hourly_history_capabilities_are_venue_supported():
+    capabilities = CcxtAdapter().capabilities(instrument("HTX"))
+
+    assert capabilities.current is True
+    assert capabilities.history is True
+    assert capabilities.history_interval_seconds == 3_600
+    assert capabilities.max_history_days == 8
+
+
+def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkeypatch):
+    exchange = StubCcxtExchange(CCXT_HOURLY["history"])
+    adapter = configured_ccxt_adapter(monkeypatch, exchange)
+    first, last = CCXT_HOURLY["history"]
+    requested = HistoryRange(first["timestamp"], last["timestamp"])
+
+    result = asyncio.run(adapter.fetch(
+        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+        requested,
+        include_history=True,
+    ))
+
+    assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
+    assert [row.timestamp_ms for row in result.history] == [
+        first["timestamp"],
+        last["timestamp"],
+    ]
+    assert last["timestamp"] - first["timestamp"] == 3_600_000
+    assert [row.value_usd for row in result.history] == [
+        first["openInterestValue"],
+        last["openInterestValue"],
+    ]
+    assert all(row.valuation is ValuationMethod.VENUE_REPORTED for row in result.history)
+    assert exchange.history_requests == [{
+        "symbol": CCXT_HOURLY["symbol"],
+        "timeframe": "1h",
+        "since": first["timestamp"],
+        "limit": 200,
+    }]
+
+
+def test_ccxt_malformed_hourly_history_preserves_current(monkeypatch):
+    exchange = StubCcxtExchange(CCXT_HOURLY["malformed_history"])
+    adapter = configured_ccxt_adapter(monkeypatch, exchange)
+
+    result = asyncio.run(adapter.fetch(
+        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+        None,
+        include_history=True,
+    ))
+
+    assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+    assert "InvalidResponse" in result.history_issue.message
+
+
+def test_ccxt_runtime_without_hourly_history_preserves_current(monkeypatch):
+    exchange = StubCcxtExchange([], supports_history=False)
+    adapter = configured_ccxt_adapter(monkeypatch, exchange)
+
+    result = asyncio.run(adapter.fetch(
+        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+        None,
+        include_history=True,
+    ))
+
+    assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+    assert exchange.history_requests == []
