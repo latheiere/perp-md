@@ -22,8 +22,12 @@ The public API is alpha, follows Semantic Versioning, and covers open interest.
 - Current observations remain usable when optional history fails.
 - Native quantities, units, marks, timestamps, and valuation methods are
   preserved alongside normalized USD notional.
+- Aggregate derivative protocols use response-level source time when
+  individual market timestamps describe unrelated last-trade activity.
 - History ranges are bounded, deduplicated, ordered, and protected by finite
   pagination limits.
+- Base-unit linear history is normalized only against exact-timestamp mark
+  candles; missing joins are reported as structured partial history.
 - History capabilities and requests use the cadence actually supported by each
   venue protocol.
 - Native adapters are preferred when registered; fallback is explicit.
