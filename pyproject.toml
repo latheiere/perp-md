@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perp-md"
-version = "0.2.0"
-description = "Typed asynchronous perpetual-market data adapters"
+version = "0.2.1"
+description = "Typed asynchronous perpetual-market open-interest and funding acquisition"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -39,7 +39,9 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/latheiere/perp-md"
+Documentation = "https://github.com/latheiere/perp-md/tree/main/docs"
 Repository = "https://github.com/latheiere/perp-md"
+Changelog = "https://github.com/latheiere/perp-md/blob/main/CHANGELOG.md"
 Issues = "https://github.com/latheiere/perp-md/issues"
 
 [tool.setuptools.packages.find]

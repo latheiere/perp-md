@@ -1,6 +1,6 @@
 name: perp-md
 title: perp-md
-version: '0.2.0'
+version: '0.2.1'
 display_version: '0.2'
 start_page: ROOT:index.adoc
 nav:
