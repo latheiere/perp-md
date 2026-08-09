@@ -1,0 +1,87 @@
+{
+  "tickers": {
+    "result": "success",
+    "serverTime": "2026-01-02T03:04:05.678Z",
+    "tickers": [
+      {
+        "symbol": "PF_LINEAR_EXTRA",
+        "openInterest": "99",
+        "markPrice": "7",
+        "lastTime": "2025-12-01T00:00:00Z"
+      },
+      {
+        "symbol": "PF_LINEAR",
+        "openInterest": "12.5",
+        "markPrice": "4",
+        "lastTime": "2025-12-02T00:00:00Z"
+      },
+      {
+        "symbol": "PI_INVERSE",
+        "openInterest": "3",
+        "markPrice": "200",
+        "lastTime": null
+      }
+    ]
+  },
+  "analytics_pages": [
+    {
+      "result": {
+        "timestamp": [300, 600],
+        "data": [
+          ["0.5", "1.25", "0.25", "1"],
+          ["1", "2.5", "0.75", "2"]
+        ],
+        "more": true
+      },
+      "errors": []
+    },
+    {
+      "result": {
+        "timestamp": [900],
+        "data": [
+          ["2", "3.5", "1.5", "3"]
+        ],
+        "more": false
+      },
+      "errors": []
+    }
+  ],
+  "mark_pages": [
+    {
+      "candles": [
+        {"time": 300000, "open": "1", "high": "2", "low": "1", "close": "2", "volume": "0"},
+        {"time": 600000, "open": "2", "high": "4", "low": "2", "close": "4", "volume": "0"}
+      ],
+      "more_candles": true
+    },
+    {
+      "candles": [
+        {"time": 900000, "open": "4", "high": "6", "low": "4", "close": "6", "volume": "0"}
+      ],
+      "more_candles": false
+    }
+  ],
+  "malformed_analytics": {
+    "result": {
+      "timestamp": [300],
+      "data": [["1", "2", "3"]],
+      "more": false
+    },
+    "errors": []
+  },
+  "misaligned_analytics": {
+    "result": {
+      "timestamp": [300, 600],
+      "data": [["1", "2", "0", "1"]],
+      "more": false
+    },
+    "errors": []
+  },
+  "partial_marks": {
+    "candles": [
+      {"time": 300000, "open": "1", "high": "2", "low": "1", "close": "2", "volume": "0"},
+      {"time": 900000, "open": "4", "high": "6", "low": "4", "close": "6", "volume": "0"}
+    ],
+    "more_candles": false
+  }
+}
