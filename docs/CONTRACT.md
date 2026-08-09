@@ -6,6 +6,17 @@
 venue-native identifiers. The library never derives a market by removing
 multipliers, separators, settlement suffixes, or other symbol components.
 
+For venue protocols with named perpetual universes, a namespace embedded in
+`symbol` selects that native scope. A caller may instead provide a recognized
+venue-native product descriptor containing the scope when `symbol` is local to
+the scoped universe. The supported scoped-product descriptor is
+`HIP-3:<native-scope>`. Ordinary product labels without a descriptor separator
+do not select a scope, and bare product scopes are not supported. When a symbol
+namespace and scoped product descriptor are both present they must agree.
+Unsupported descriptor families, missing or malformed scopes, and conflicting
+metadata produce `InvalidInstrument`. An instrument without a symbol namespace
+or scoped product descriptor continues to use the venue's default universe.
+
 Contract-count OI normalization requires explicit contract direction and
 multiplier. Missing required metadata produces `InvalidInstrument`, never a
 guessed conversion. For a linear contract, `contract_multiplier` is canonical
@@ -46,6 +57,13 @@ to documented venue retention and the latest complete native bucket. A paged
 adapter continues through a short response when source timestamps show that
 the requested range has not yet been traversed; sparse native buckets do not
 silently truncate later available history.
+
+Optional-provider adapters request a venue-supported native history cadence,
+and capability intervals describe that requested cadence. A documented
+record-count bound may be reported as a conservative whole-day lookback. If a
+provider runtime omits advertised history support or returns malformed history
+after current OI succeeds, the result preserves current OI and reports a
+structured `HistoryIssue`.
 
 ## Capabilities
 

@@ -16,12 +16,16 @@ The public API is alpha, follows Semantic Versioning, and covers open interest.
 ## Behavior
 
 - Venue-native symbols are accepted without symbol guessing or rewriting.
+- Namespaced perpetual instruments route through their venue-native product
+  scope while default-universe instruments retain unscoped requests.
 - Missing and unsupported values are never represented as zero.
 - Current observations remain usable when optional history fails.
 - Native quantities, units, marks, timestamps, and valuation methods are
   preserved alongside normalized USD notional.
 - History ranges are bounded, deduplicated, ordered, and protected by finite
   pagination limits.
+- History capabilities and requests use the cadence actually supported by each
+  venue protocol.
 - Native adapters are preferred when registered; fallback is explicit.
 - External I/O is asynchronous, bounded, injectable, and independently
   testable.

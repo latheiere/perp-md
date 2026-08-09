@@ -58,7 +58,8 @@ Each adapter implements:
 
 Native adapter tests use recorded JSON fixtures and injected transports. The
 offline suite covers successful normalization, zero values, pagination,
-deduplication, malformed history, partial results, and exact CCXT resolution.
+deduplication, native history cadence, malformed history, partial results,
+scoped perpetual universes, and exact CCXT resolution.
 
 ## Package boundaries
 

@@ -1,0 +1,63 @@
+{
+  "default_success": [
+    {
+      "universe": [
+        {
+          "szDecimals": 5,
+          "name": "BTC",
+          "maxLeverage": 40,
+          "marginTableId": 56
+        }
+      ]
+    },
+    [
+      {
+        "funding": "0.0000064719",
+        "openInterest": "34405.54348",
+        "oraclePx": "64893.8",
+        "markPx": "64863.0"
+      }
+    ]
+  ],
+  "scoped_success": [
+    {
+      "universe": [
+        {
+          "szDecimals": 4,
+          "name": "xyz:XYZ100",
+          "maxLeverage": 30,
+          "marginTableId": 30
+        }
+      ]
+    },
+    [
+      {
+        "funding": "0.00000625",
+        "openInterest": "6259.5902",
+        "oraclePx": "29777.0",
+        "markPx": "29772.0"
+      }
+    ]
+  ],
+  "malformed": [
+    {
+      "universe": [
+        {"name": "xyz:XYZ100"},
+        {"name": "xyz:TSLA"}
+      ]
+    },
+    [
+      {"openInterest": "6259.5902", "markPx": "29772.0"}
+    ]
+  ],
+  "absent": [
+    {
+      "universe": [
+        {"name": "BTC"}
+      ]
+    },
+    [
+      {"openInterest": "34405.54348", "markPx": "64863.0"}
+    ]
+  ]
+}
