@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:perp-md:schema:declared-coverage:1",
+  "title": "perp-md declared acquisition coverage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_id", "generated_at", "producer", "mappings"],
+  "properties": {
+    "schema_version": {"const": "acquisition.coverage/v1"},
+    "manifest_id": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "mappings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/mapping"}
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"$ref": "#/$defs/stableId"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "nativeName": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "context"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?:\\S|\\S[\\s\\S]*\\S)$"
+        }
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_selectors", "instrument_metadata", "market_observations", "runtime_features"],
+      "properties": {
+        "identity_selectors": {
+          "type": "array",
+          "items": {"$ref": "urn:cdm:schema:native-identity-selector:1"}
+        },
+        "instrument_metadata": {"type": "array", "items": {"type": "string", "pattern": "^\\$\\."}},
+        "market_observations": {"type": "array", "items": {"$ref": "#/$defs/stableId"}},
+        "runtime_features": {"type": "array", "items": {"$ref": "#/$defs/stableId"}}
+      }
+    },
+    "retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_scope", "history_scope", "pagination"],
+      "properties": {
+        "request_scope": {"enum": ["instrument", "provider_aggregate"]},
+        "history_scope": {"enum": ["none", "latest_window", "bounded", "full_retained"]},
+        "pagination": {"enum": ["none", "single_page", "time_cursor", "full_download", "runtime_defined"]}
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_id", "datapoint", "declared_state", "lineage", "source_observations", "requirements", "retrieval", "limitations"],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/stableId"},
+        "datapoint": {"$ref": "urn:cdm:schema:datapoint:1"},
+        "declared_state": {"enum": ["supported", "conditional", "unavailable"]},
+        "lineage": {
+          "anyOf": [
+            {"$ref": "urn:cdm:schema:measurement-lineage:1"},
+            {"type": "null"}
+          ]
+        },
+        "source_observations": {"type": "array", "items": {"$ref": "#/$defs/nativeName"}},
+        "requirements": {"$ref": "#/$defs/requirements"},
+        "retrieval": {"$ref": "#/$defs/retrieval"},
+        "limitations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"declared_state": {"const": "unavailable"}}},
+          "then": {"properties": {"lineage": {"type": "null"}}},
+          "else": {"properties": {"lineage": {"$ref": "urn:cdm:schema:measurement-lineage:1"}}}
+        }
+      ]
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mapping_id", "adapter_id", "venue_id", "native_instrument_type", "instrument_scenario", "capabilities"],
+      "properties": {
+        "mapping_id": {"$ref": "#/$defs/stableId"},
+        "adapter_id": {"$ref": "#/$defs/stableId"},
+        "venue_id": {"type": "string", "minLength": 1},
+        "native_instrument_type": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["family_id", "names"],
+          "properties": {
+            "family_id": {"$ref": "#/$defs/stableId"},
+            "names": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nativeName"}}
+          }
+        },
+        "instrument_scenario": {"$ref": "urn:cdm:schema:instrument-scenario:1"},
+        "capabilities": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/capability"}}
+      }
+    }
+  }
+}

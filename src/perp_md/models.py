@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 from enum import StrEnum
+
+from cdm import (
+    FundingIntervalV1,
+    FundingRateKind,
+    FundingSampleV1,
+    NotionalDenomination,
+    OpenInterestMeasure,
+    OpenInterestValueV1,
+)
 
 from perp_md.errors import InvalidInstrument, InvalidResponse
 
@@ -55,7 +66,9 @@ class Instrument:
                     "contract_multiplier must be finite and positive"
                 ) from exc
             if not math.isfinite(value) or value <= 0:
-                raise InvalidInstrument("contract_multiplier must be finite and positive")
+                raise InvalidInstrument(
+                    "contract_multiplier must be finite and positive"
+                )
             object.__setattr__(self, "contract_multiplier", value)
 
 
@@ -71,7 +84,11 @@ class HistoryRange:
             raise ValueError("end_ms must not be negative")
         if self.start_ms is None and self.end_ms is not None:
             raise ValueError("end_ms requires start_ms")
-        if self.start_ms is not None and self.end_ms is not None and self.start_ms > self.end_ms:
+        if (
+            self.start_ms is not None
+            and self.end_ms is not None
+            and self.start_ms > self.end_ms
+        ):
             raise ValueError("start_ms must not exceed end_ms")
 
 
@@ -83,6 +100,7 @@ class OpenInterestObservation:
     native_unit: NativeUnit | None = None
     mark_price: float | None = None
     valuation: ValuationMethod = ValuationMethod.VENUE_REPORTED
+    base_quantity: OpenInterestValueV1 | None = None
 
     def __post_init__(self) -> None:
         value = float(self.value_usd)
@@ -92,13 +110,31 @@ class OpenInterestObservation:
         if self.native_value is not None:
             native = float(self.native_value)
             if not math.isfinite(native) or native < 0:
-                raise InvalidResponse("native open interest must be finite and non-negative")
+                raise InvalidResponse(
+                    "native open interest must be finite and non-negative"
+                )
             object.__setattr__(self, "native_value", native)
         if self.mark_price is not None:
             mark = float(self.mark_price)
             if not math.isfinite(mark) or mark <= 0:
                 raise InvalidResponse("mark price must be finite and positive")
             object.__setattr__(self, "mark_price", mark)
+        if self.base_quantity is not None and not isinstance(
+            self.base_quantity, OpenInterestValueV1
+        ):
+            raise InvalidResponse(
+                "base quantity must use the CDM open-interest contract"
+            )
+
+    @property
+    def notional(self) -> OpenInterestValueV1:
+        """Return the legacy reporting-notional output through the CDM contract."""
+
+        return OpenInterestValueV1(
+            Decimal(str(self.value_usd)),
+            OpenInterestMeasure.NOTIONAL,
+            NotionalDenomination.REPORTING,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,3 +158,94 @@ class OpenInterestCapabilities:
     history_interval_seconds: int | None = None
     max_history_days: int | None = None
     required_metadata: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFundingEvidence:
+    """Acquisition evidence that is intentionally outside the CDM economics."""
+
+    source_observation: str
+    retrieved_at: datetime
+    source_value: Decimal | None = None
+    mark_price: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not self.source_observation
+            or self.source_observation != self.source_observation.strip()
+        ):
+            raise InvalidResponse(
+                "funding evidence requires a stable source observation"
+            )
+        if (
+            self.retrieved_at.tzinfo is None
+            or self.retrieved_at.utcoffset()
+            != timezone.utc.utcoffset(self.retrieved_at)
+        ):
+            raise InvalidResponse("funding retrieval time must be UTC-aware")
+        if self.source_value is not None and (
+            not isinstance(self.source_value, Decimal)
+            or not self.source_value.is_finite()
+        ):
+            raise InvalidResponse("funding source value must be a finite Decimal")
+        if self.mark_price is not None:
+            if (
+                not isinstance(self.mark_price, Decimal)
+                or not self.mark_price.is_finite()
+                or self.mark_price <= 0
+            ):
+                raise InvalidResponse(
+                    "funding evidence mark price must be a positive finite Decimal"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class FundingObservation:
+    sample: FundingSampleV1
+    provider_evidence: ProviderFundingEvidence
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sample, FundingSampleV1):
+            raise InvalidResponse("funding sample must use the CDM funding contract")
+        if not isinstance(self.provider_evidence, ProviderFundingEvidence):
+            raise InvalidResponse("funding observation requires provider evidence")
+
+    @property
+    def timestamp_ms(self) -> int:
+        point = (
+            self.sample.effective_at
+            if self.sample.kind in (FundingRateKind.NEXT, FundingRateKind.SETTLED)
+            else self.sample.observed_at or self.provider_evidence.retrieved_at
+        )
+        assert point is not None
+        return int(point.timestamp() * 1_000)
+
+    @property
+    def rate(self) -> float:
+        return float(self.sample.rate)
+
+    @property
+    def kind(self) -> FundingRateKind:
+        return self.sample.kind
+
+    @property
+    def interval(self) -> FundingIntervalV1:
+        return self.sample.interval
+
+
+@dataclass(frozen=True, slots=True)
+class FundingResult:
+    current: FundingObservation
+    history: tuple[FundingObservation, ...] = ()
+    history_issue: HistoryIssue | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FundingCapabilities:
+    current: bool
+    current_kinds: tuple[FundingRateKind, ...]
+    history: bool
+    history_requires_start: bool = False
+    declared_interval: FundingIntervalV1 | None = None
+    required_metadata: tuple[str, ...] = ()
+    runtime_conditional: bool = False

@@ -5,15 +5,16 @@ from collections.abc import Iterable, Mapping
 from cdm import (
     DataPointDefinitionV1,
     DataPointKind,
+    FundingIntervalKind,
     InstrumentDescriptorV1,
     InstrumentReferenceV1,
     NativeIdentityV1,
     TemporalMode,
 )
 
-from perp_md.adapters.base import OpenInterestAdapter
-from perp_md.adapters.ccxt import CcxtAdapter
-from perp_md.adapters.native import native_adapters
+from perp_md.adapters.base import FundingAdapter
+from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
+from perp_md.adapters.funding import native_funding_adapters
 from perp_md.capabilities import (
     AcquisitionPlan,
     CapabilityAssessment,
@@ -25,15 +26,17 @@ from perp_md.capabilities import (
 from perp_md.errors import AdapterUnavailable, CapabilityUnavailable
 from perp_md.identity import ReferenceInstrument
 from perp_md.models import (
+    FundingCapabilities,
+    FundingResult,
     HistoryRange,
     Instrument,
-    OpenInterestCapabilities,
-    OpenInterestResult,
 )
 from perp_md.transport import HttpxTransport, JsonTransport
 
 
-class OpenInterestClient:
+class FundingClient:
+    """Typed funding acquisition client independent from open-interest state."""
+
     def __init__(
         self,
         *,
@@ -41,9 +44,9 @@ class OpenInterestClient:
         request_concurrency: int = 16,
         per_host_concurrency: int = 4,
         transport: JsonTransport | None = None,
-        adapters: Mapping[str, OpenInterestAdapter] | None = None,
+        adapters: Mapping[str, FundingAdapter] | None = None,
         enable_ccxt_fallback: bool = False,
-        fallback: OpenInterestAdapter | None = None,
+        fallback: FundingAdapter | None = None,
     ) -> None:
         self._owns_transport = transport is None
         self._transport = transport or HttpxTransport(
@@ -53,17 +56,18 @@ class OpenInterestClient:
         )
         self._adapters = {
             key.upper(): value
-            for key, value in (adapters or native_adapters(self._transport)).items()
+            for key, value in (
+                adapters or native_funding_adapters(self._transport)
+            ).items()
         }
         self._fallback = fallback or (
-            CcxtAdapter(timeout_seconds) if enable_ccxt_fallback else None
+            CcxtFundingAdapter(timeout_seconds) if enable_ccxt_fallback else None
         )
         self._runtime_feature_cache: dict[tuple[int, str], frozenset[str]] = {}
         self._closed = False
 
-    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
-        adapter = self._select(instrument)
-        return adapter.capabilities(instrument)
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return self._select(instrument).capabilities(instrument)
 
     def assess(
         self,
@@ -72,7 +76,7 @@ class OpenInterestClient:
         *,
         native_identities: Iterable[NativeIdentityV1] = (),
         datapoint: DataPointKind
-        | DataPointDefinitionV1 = DataPointKind.OPEN_INTEREST_NOTIONAL,
+        | DataPointDefinitionV1 = DataPointKind.FUNDING_INDICATIVE_RATE,
         temporal_mode: TemporalMode | None = None,
         market_observations: Iterable[str] | None = None,
         runtime_features: Iterable[str] = (),
@@ -117,7 +121,7 @@ class OpenInterestClient:
         reference: InstrumentReferenceV1,
         *,
         datapoint: DataPointKind
-        | DataPointDefinitionV1 = DataPointKind.OPEN_INTEREST_NOTIONAL,
+        | DataPointDefinitionV1 = DataPointKind.FUNDING_INDICATIVE_RATE,
         temporal_mode: TemporalMode | None = None,
         market_observations: Iterable[str] | None = None,
     ) -> CapabilityAssessment:
@@ -166,22 +170,31 @@ class OpenInterestClient:
         history: HistoryRange | None = None,
         *,
         include_history: bool = True,
-    ) -> OpenInterestResult:
+    ) -> FundingResult:
         """Fetch from an unchanged CDM reference after structured preflight."""
 
         if self._closed:
             raise RuntimeError("client is closed")
-        current = await self.assess_runtime(
-            provider_id,
-            reference,
-            temporal_mode=TemporalMode.CURRENT,
-        )
-        if current.status is not CapabilityStatus.SUPPORTED:
-            raise CapabilityUnavailable(current)
+        assessments = [
+            await self.assess_runtime(
+                provider_id,
+                reference,
+                datapoint=kind,
+                temporal_mode=temporal,
+            )
+            for kind, temporal in (
+                (DataPointKind.FUNDING_INDICATIVE_RATE, TemporalMode.CURRENT),
+                (DataPointKind.FUNDING_NEXT_RATE, TemporalMode.NEXT),
+                (DataPointKind.FUNDING_SETTLED_RATE, TemporalMode.SETTLED),
+            )
+        ]
+        if not any(item.status is CapabilityStatus.SUPPORTED for item in assessments):
+            raise CapabilityUnavailable(_best_assessment(assessments))
         if include_history:
             historical = await self.assess_runtime(
                 provider_id,
                 reference,
+                datapoint=DataPointKind.FUNDING_SETTLED_RATE,
                 temporal_mode=TemporalMode.HISTORICAL,
             )
             if any(
@@ -202,7 +215,7 @@ class OpenInterestClient:
         reference: InstrumentReferenceV1,
         *,
         datapoint: DataPointKind
-        | DataPointDefinitionV1 = DataPointKind.OPEN_INTEREST_NOTIONAL,
+        | DataPointDefinitionV1 = DataPointKind.FUNDING_INDICATIVE_RATE,
         temporal_mode: TemporalMode = TemporalMode.CURRENT,
         market_observations: Iterable[str] | None = None,
     ) -> AcquisitionPlan:
@@ -220,14 +233,17 @@ class OpenInterestClient:
             capabilities = self._select(instrument).capabilities(instrument)
         except AdapterUnavailable:
             return planned_retrieval(assessment)
+        interval = capabilities.declared_interval
+        fixed_interval_seconds = (
+            interval.duration_seconds
+            if interval is not None
+            and interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+            else None
+        )
         return planned_retrieval(
             assessment,
-            fixed_interval_seconds=capabilities.history_interval_seconds,
-            max_lookback_seconds=(
-                capabilities.max_history_days * 86_400
-                if capabilities.max_history_days is not None
-                else None
-            ),
+            fixed_interval_seconds=fixed_interval_seconds,
+            requires_explicit_start=capabilities.history_requires_start,
         )
 
     async def fetch(
@@ -236,11 +252,13 @@ class OpenInterestClient:
         history: HistoryRange | None = None,
         *,
         include_history: bool = True,
-    ) -> OpenInterestResult:
+    ) -> FundingResult:
         if self._closed:
             raise RuntimeError("client is closed")
         return await self._select(instrument).fetch(
-            instrument, history, include_history=include_history
+            instrument,
+            history,
+            include_history=include_history,
         )
 
     async def close(self) -> None:
@@ -256,7 +274,7 @@ class OpenInterestClient:
         if self._owns_transport:
             await self._transport.close()
 
-    async def __aenter__(self) -> "OpenInterestClient":
+    async def __aenter__(self) -> "FundingClient":
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -265,15 +283,26 @@ class OpenInterestClient:
     def _select(
         self,
         instrument: Instrument | ReferenceInstrument,
-    ) -> OpenInterestAdapter:
+    ) -> FundingAdapter:
         adapter = self._adapters.get(instrument.venue)
         if adapter is not None and adapter.supports(instrument):
             return adapter
         if self._fallback is not None and self._fallback.supports(instrument):
             return self._fallback
-        raise AdapterUnavailable(
-            "no open-interest adapter is configured for this venue"
-        )
+        raise AdapterUnavailable("no funding adapter is configured for this provider")
+
+
+def _best_assessment(
+    assessments: list[CapabilityAssessment],
+) -> CapabilityAssessment:
+    rank = {
+        CapabilityStatus.METADATA_INCOMPLETE: 0,
+        CapabilityStatus.RUNTIME_UNAVAILABLE: 1,
+        CapabilityStatus.ADAPTER_UNAVAILABLE: 2,
+        CapabilityStatus.UNSUPPORTED: 3,
+        CapabilityStatus.SUPPORTED: 4,
+    }
+    return min(assessments, key=lambda item: rank[item.status])
 
 
 def _provider_id(value: str) -> str:

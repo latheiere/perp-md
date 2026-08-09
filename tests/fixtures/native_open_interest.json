@@ -19,6 +19,16 @@
       "time": 950000,
       "result": {"list": [{"markPrice": "2", "openInterest": "9", "openInterestValue": "18"}]}
     },
+    "mark_history": {
+      "retCode": 0,
+      "result": {
+        "list": [
+          ["900000", "2"],
+          ["600000", "2"],
+          ["300000", "2"]
+        ]
+      }
+    },
     "history": [
       {
         "retCode": 0,
@@ -43,15 +53,15 @@
   },
   "gate": {
     "details": {"type": "direct", "position_size": "5", "quanto_multiplier": "0.1", "mark_price": "10"},
-    "history": [{"time": 300, "open_interest_usd": "8"}],
+    "history": [{"time": 300, "open_interest": "0.8", "open_interest_usd": "8", "mark_price": "10"}],
     "sparse_history": [
       [
-        {"time": 300, "open_interest_usd": "3"},
-        {"time": 900, "open_interest_usd": "9"}
+        {"time": 300, "open_interest": "0.3", "open_interest_usd": "3", "mark_price": "10"},
+        {"time": 900, "open_interest": "0.9", "open_interest_usd": "9", "mark_price": "10"}
       ],
       [
-        {"time": 1200, "open_interest_usd": "12"},
-        {"time": 1500, "open_interest_usd": "15"}
+        {"time": 1200, "open_interest": "1.2", "open_interest_usd": "12", "mark_price": "10"},
+        {"time": 1500, "open_interest": "1.5", "open_interest_usd": "15", "mark_price": "10"}
       ]
     ],
     "malformed_history": {"time": 300, "open_interest_usd": "8"}

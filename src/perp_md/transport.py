@@ -26,8 +26,12 @@ class HttpxTransport:
     cache_ttl_seconds: float = 3
     _http: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
     _global: asyncio.Semaphore = field(init=False, repr=False)
-    _hosts: dict[str, asyncio.Semaphore] = field(default_factory=dict, init=False, repr=False)
-    _cache: dict[str, tuple[float, asyncio.Task[Any]]] = field(default_factory=dict, init=False, repr=False)
+    _hosts: dict[str, asyncio.Semaphore] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _cache: dict[str, tuple[float, asyncio.Task[Any]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
@@ -42,8 +46,11 @@ class HttpxTransport:
         async def request() -> Any:
             client = await self._client()
             host = urlsplit(url).hostname or "unknown"
-            async with self._global, self._hosts.setdefault(
-                host, asyncio.Semaphore(self.per_host_concurrency)
+            async with (
+                self._global,
+                self._hosts.setdefault(
+                    host, asyncio.Semaphore(self.per_host_concurrency)
+                ),
             ):
                 response = await client.get(url, params=params)
             response.raise_for_status()
@@ -57,8 +64,11 @@ class HttpxTransport:
         async def request() -> Any:
             client = await self._client()
             host = urlsplit(url).hostname or "unknown"
-            async with self._global, self._hosts.setdefault(
-                host, asyncio.Semaphore(self.per_host_concurrency)
+            async with (
+                self._global,
+                self._hosts.setdefault(
+                    host, asyncio.Semaphore(self.per_host_concurrency)
+                ),
             ):
                 response = await client.post(url, json=payload)
             response.raise_for_status()

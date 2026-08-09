@@ -1,3 +1,3 @@
-from perp_md.adapters.base import OpenInterestAdapter
+from perp_md.adapters.base import FundingAdapter, OpenInterestAdapter
 
-__all__ = ["OpenInterestAdapter"]
+__all__ = ["FundingAdapter", "OpenInterestAdapter"]

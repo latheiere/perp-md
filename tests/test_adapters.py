@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+import perp_md.adapters.ccxt as ccxt_adapter_module
+import perp_md.adapters.native as native
 from perp_md import (
     AdapterUnavailable,
     ContractDirection,
@@ -23,6 +25,7 @@ from perp_md import (
 from perp_md.adapters.ccxt import CcxtAdapter, resolve_ccxt_symbol
 from perp_md.adapters.native import (
     BinanceAdapter,
+    BitfinexAdapter,
     BybitAdapter,
     GateAdapter,
     HyperliquidAdapter,
@@ -31,9 +34,6 @@ from perp_md.adapters.native import (
     OkxAdapter,
 )
 from perp_md.transport import HttpxTransport
-import perp_md.adapters.native as native
-import perp_md.adapters.ccxt as ccxt_adapter_module
-
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "native_open_interest.json").read_text()
@@ -82,10 +82,12 @@ class StubCcxtExchange:
             "fetchOpenInterestHistory": supports_history,
         }
         self.markets_by_id = {
-            CCXT_HOURLY["market_id"]: [{
-                "symbol": CCXT_HOURLY["symbol"],
-                "contract": True,
-            }]
+            CCXT_HOURLY["market_id"]: [
+                {
+                    "symbol": CCXT_HOURLY["symbol"],
+                    "contract": True,
+                }
+            ]
         }
         self.history = history
         self.history_requests: list[dict[str, Any]] = []
@@ -95,12 +97,14 @@ class StubCcxtExchange:
         return CCXT_HOURLY["current"]
 
     async def fetch_open_interest_history(self, symbol, *, timeframe, since, limit):
-        self.history_requests.append({
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "since": since,
-            "limit": limit,
-        })
+        self.history_requests.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "since": since,
+                "limit": limit,
+            }
+        )
         return self.history
 
     async def close(self):
@@ -132,12 +136,27 @@ def test_binance_pages_backward_deduplicates_and_keeps_current(monkeypatch):
         return FIXTURE["binance"]["mark"]
 
     transport = StubTransport(handler)
-    result = asyncio.run(BinanceAdapter(transport, lambda: 900.5).fetch(
-        instrument("BINANCE"), HistoryRange(300_000, 900_000), include_history=True
-    ))
+    result = asyncio.run(
+        BinanceAdapter(transport, lambda: 900.5).fetch(
+            instrument("BINANCE"), HistoryRange(300_000, 900_000), include_history=True
+        )
+    )
     assert result.current.value_usd == 20
+    assert result.current.base_quantity is not None
+    assert float(result.current.base_quantity.amount) == 10
     assert [row.timestamp_ms for row in result.history] == [300_000, 600_000, 900_000]
-    requests = [params for _, url, params in transport.requests if url.endswith("openInterestHist")]
+    assert [
+        float(row.base_quantity.amount) for row in result.history if row.base_quantity
+    ] == [
+        3,
+        6,
+        9,
+    ]
+    requests = [
+        params
+        for _, url, params in transport.requests
+        if url.endswith("openInterestHist")
+    ]
     assert [row["endTime"] for row in requests] == [900_000, 599_999]
 
 
@@ -149,32 +168,66 @@ def test_history_failure_is_structured_partial_success():
             return FIXTURE["binance"]["current"]
         return FIXTURE["binance"]["mark"]
 
-    result = asyncio.run(BinanceAdapter(StubTransport(handler), lambda: 900.5).fetch(
-        instrument("BINANCE"), HistoryRange(300_000, 900_000), include_history=True
-    ))
+    result = asyncio.run(
+        BinanceAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument("BINANCE"), HistoryRange(300_000, 900_000), include_history=True
+        )
+    )
     assert result.current.value_usd == 20
     assert result.history == ()
     assert result.history_issue is not None
     assert result.history_issue.code == "history_unavailable"
 
 
-def test_bybit_follows_cursor_and_marks_historical_valuation():
+def test_linear_contract_history_joins_exact_timestamp_marks():
     pages = FIXTURE["bybit"]["history"]
 
     async def handler(method, url, params):
         if url.endswith("open-interest"):
             return pages[1 if params.get("cursor") else 0]
+        if url.endswith("mark-price-kline"):
+            return FIXTURE["bybit"]["mark_history"]
         return FIXTURE["bybit"]["ticker"]
 
     transport = StubTransport(handler)
-    result = asyncio.run(BybitAdapter(transport, lambda: 900.5).fetch(
-        instrument("BYBIT"), HistoryRange(300_000, 900_000), include_history=True
-    ))
+    result = asyncio.run(
+        BybitAdapter(transport, lambda: 900.5).fetch(
+            instrument("BYBIT"), HistoryRange(300_000, 900_000), include_history=True
+        )
+    )
     assert result.current.value_usd == 18
     assert [row.value_usd for row in result.history] == [6, 12, 18]
-    assert all(row.valuation is ValuationMethod.CURRENT_MARK for row in result.history)
-    history_requests = [params for _, url, params in transport.requests if url.endswith("open-interest")]
+    assert all(row.valuation is ValuationMethod.MARK_PRICE for row in result.history)
+    assert all(row.base_quantity is not None for row in result.history)
+    history_requests = [
+        params for _, url, params in transport.requests if url.endswith("open-interest")
+    ]
     assert history_requests[1]["cursor"] == "next"
+
+
+def test_linear_contract_history_reports_missing_exact_timestamp_marks():
+    pages = FIXTURE["bybit"]["history"]
+    partial_marks = json.loads(json.dumps(FIXTURE["bybit"]["mark_history"]))
+    partial_marks["result"]["list"] = partial_marks["result"]["list"][:2]
+
+    async def handler(method, url, params):
+        if url.endswith("open-interest"):
+            return pages[1 if params.get("cursor") else 0]
+        if url.endswith("mark-price-kline"):
+            return partial_marks
+        return FIXTURE["bybit"]["ticker"]
+
+    result = asyncio.run(
+        BybitAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument("BYBIT"),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
+
+    assert [point.timestamp_ms for point in result.history] == [600_000, 900_000]
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_partial"
 
 
 def test_gate_current_includes_both_position_sides():
@@ -183,12 +236,17 @@ def test_gate_current_includes_both_position_sides():
             return FIXTURE["gate"]["history"]
         return FIXTURE["gate"]["details"]
 
-    result = asyncio.run(GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
-        instrument("GATE"), None, include_history=True
-    ))
+    result = asyncio.run(
+        GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument("GATE"), None, include_history=True
+        )
+    )
     assert result.current.native_value == 10
     assert result.current.value_usd == 10
+    assert result.current.base_quantity is not None
+    assert float(result.current.base_quantity.amount) == 1
     assert result.history[0].value_usd == 8
+    assert result.history[0].base_quantity is not None
 
 
 def test_gate_continues_after_a_short_sparse_history_page(monkeypatch):
@@ -201,15 +259,21 @@ def test_gate_continues_after_a_short_sparse_history_page(monkeypatch):
         return FIXTURE["gate"]["details"]
 
     transport = StubTransport(handler)
-    result = asyncio.run(GateAdapter(transport, lambda: 1_500.5).fetch(
-        instrument("GATE"), HistoryRange(300_000, 1_500_000), include_history=True
-    ))
+    result = asyncio.run(
+        GateAdapter(transport, lambda: 1_500.5).fetch(
+            instrument("GATE"), HistoryRange(300_000, 1_500_000), include_history=True
+        )
+    )
 
     assert [row.timestamp_ms for row in result.history] == [
-        300_000, 900_000, 1_200_000, 1_500_000,
+        300_000,
+        900_000,
+        1_200_000,
+        1_500_000,
     ]
     requests = [
-        params for _, url, params in transport.requests
+        params
+        for _, url, params in transport.requests
         if url.endswith("contract_stats")
     ]
     assert [row["from"] for row in requests] == [300, 901]
@@ -221,9 +285,11 @@ def test_gate_malformed_history_preserves_current_observation():
             return FIXTURE["gate"]["malformed_history"]
         return FIXTURE["gate"]["details"]
 
-    result = asyncio.run(GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
-        instrument("GATE"), HistoryRange(300_000, 900_000), include_history=True
-    ))
+    result = asyncio.run(
+        GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument("GATE"), HistoryRange(300_000, 900_000), include_history=True
+        )
+    )
 
     assert result.current.value_usd == 10
     assert result.history == ()
@@ -235,13 +301,17 @@ def test_okx_preserves_reported_zero():
     async def handler(method, url, params):
         return FIXTURE["okx"]
 
-    result = asyncio.run(OkxAdapter(StubTransport(handler)).fetch(
-        instrument("OKX"), None, include_history=False
-    ))
+    result = asyncio.run(
+        OkxAdapter(StubTransport(handler)).fetch(
+            instrument("OKX"), None, include_history=False
+        )
+    )
     assert result.current.value_usd == 0
 
 
-@pytest.mark.parametrize("product", [None, "PERP"], ids=["no-product", "ordinary-product"])
+@pytest.mark.parametrize(
+    "product", [None, "PERP"], ids=["no-product", "ordinary-product"]
+)
 def test_default_perpetual_universe_retains_unscoped_request_behavior(product):
     payload = HYPERLIQUID_CONTEXTS["default_success"]
 
@@ -255,9 +325,7 @@ def test_default_perpetual_universe_retains_unscoped_request_behavior(product):
         symbol=payload[0]["universe"][0]["name"],
         product=product,
     )
-    result = asyncio.run(adapter.fetch(
-        subject, None, include_history=False
-    ))
+    result = asyncio.run(adapter.fetch(subject, None, include_history=False))
 
     context = payload[1][0]
     assert result.current.native_unit is NativeUnit.BASE
@@ -302,9 +370,11 @@ def test_scoped_perpetual_universe_uses_native_identity(symbol_form, product_for
         symbol=qualified_symbol if symbol_form == "qualified" else local_symbol,
         product=product,
     )
-    result = asyncio.run(HyperliquidAdapter(transport, lambda: 1).fetch(
-        subject, None, include_history=False
-    ))
+    result = asyncio.run(
+        HyperliquidAdapter(transport, lambda: 1).fetch(
+            subject, None, include_history=False
+        )
+    )
 
     context = payload[1][0]
     assert result.current.native_value == float(context["openInterest"])
@@ -322,7 +392,9 @@ def test_scoped_perpetual_universe_uses_native_identity(symbol_form, product_for
     ("fixture_name", "error"),
     [("malformed", InvalidResponse), ("absent", DataUnavailable)],
 )
-def test_perpetual_universe_rejects_malformed_or_absent_observations(fixture_name, error):
+def test_perpetual_universe_rejects_malformed_or_absent_observations(
+    fixture_name, error
+):
     payload = HYPERLIQUID_CONTEXTS[fixture_name]
 
     async def handler(method, url, params):
@@ -334,9 +406,11 @@ def test_perpetual_universe_rejects_malformed_or_absent_observations(fixture_nam
         else "ABSENT_NATIVE_SYMBOL"
     )
     with pytest.raises(error):
-        asyncio.run(HyperliquidAdapter(StubTransport(handler), lambda: 1).fetch(
-            instrument("HYPERLIQUID", symbol=symbol), None, include_history=False
-        ))
+        asyncio.run(
+            HyperliquidAdapter(StubTransport(handler), lambda: 1).fetch(
+                instrument("HYPERLIQUID", symbol=symbol), None, include_history=False
+            )
+        )
 
 
 def test_scoped_perpetual_identity_rejects_conflicting_native_scope():
@@ -344,15 +418,17 @@ def test_scoped_perpetual_identity_rejects_conflicting_native_scope():
     qualified_symbol = payload[0]["universe"][0]["name"]
 
     with pytest.raises(InvalidInstrument):
-        asyncio.run(HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
-            instrument(
-                "HYPERLIQUID",
-                symbol=qualified_symbol,
-                product="HIP-3:conflicting-scope",
-            ),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
+                instrument(
+                    "HYPERLIQUID",
+                    symbol=qualified_symbol,
+                    product="HIP-3:conflicting-scope",
+                ),
+                None,
+                include_history=False,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -381,11 +457,13 @@ def test_scoped_perpetual_identity_rejects_malformed_product(product_template):
     product = product_template.format(scope=scope)
 
     with pytest.raises(InvalidInstrument):
-        asyncio.run(HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
-            instrument("HYPERLIQUID", symbol=local_symbol, product=product),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            HyperliquidAdapter(StubTransport(None), lambda: 1).fetch(
+                instrument("HYPERLIQUID", symbol=local_symbol, product=product),
+                None,
+                include_history=False,
+            )
+        )
 
 
 def test_aggregate_contract_ticker_uses_exact_symbol_and_generic_linear_metadata():
@@ -434,9 +512,11 @@ def test_aggregate_contract_ticker_rejects_invalid_payloads(payload):
 
     symbol = MEXC_MALFORMED["data"][0]["symbol"]
     with pytest.raises(InvalidResponse):
-        asyncio.run(MexcAdapter(StubTransport(handler)).fetch(
-            instrument("MEXC", symbol=symbol), None, include_history=False
-        ))
+        asyncio.run(
+            MexcAdapter(StubTransport(handler)).fetch(
+                instrument("MEXC", symbol=symbol), None, include_history=False
+            )
+        )
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
@@ -452,9 +532,11 @@ def test_aggregate_contract_ticker_requires_one_exact_instrument_match(ambiguous
         return payload
 
     with pytest.raises(DataUnavailable):
-        asyncio.run(MexcAdapter(StubTransport(handler)).fetch(
-            instrument("MEXC", symbol=symbol), None, include_history=False
-        ))
+        asyncio.run(
+            MexcAdapter(StubTransport(handler)).fetch(
+                instrument("MEXC", symbol=symbol), None, include_history=False
+            )
+        )
 
 
 def test_concurrent_aggregate_contract_ticker_reads_share_one_request():
@@ -489,10 +571,12 @@ def test_concurrent_aggregate_contract_ticker_reads_share_one_request():
             )
             for row, multiplier in zip(MEXC_SUCCESS["data"], (0.0001, 0.01))
         ]
-        results = await asyncio.gather(*(
-            adapter.fetch(subject, None, include_history=False)
-            for subject in subjects
-        ))
+        results = await asyncio.gather(
+            *(
+                adapter.fetch(subject, None, include_history=False)
+                for subject in subjects
+            )
+        )
         await transport.close()
         return results
 
@@ -577,17 +661,19 @@ def test_aggregate_inverse_ticker_does_not_require_a_positive_mark(reported_mark
     async def handler(method, url, params):
         return payload
 
-    result = asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
-        instrument(
-            "KRAKEN",
-            symbol=selected["symbol"],
-            settlement_currency="BASE",
-            contract_direction=ContractDirection.INVERSE,
-            contract_multiplier=100,
-        ),
-        None,
-        include_history=False,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "KRAKEN",
+                symbol=selected["symbol"],
+                settlement_currency="BASE",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=100,
+            ),
+            None,
+            include_history=False,
+        )
+    )
 
     assert result.current.native_value == 3
     assert result.current.value_usd == 300
@@ -605,31 +691,35 @@ def test_aggregate_mixed_unit_ticker_requires_typed_contract_direction(direction
         return KRAKEN_OPEN_INTEREST["tickers"]
 
     with pytest.raises(InvalidInstrument):
-        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
-            instrument(
-                "KRAKEN",
-                symbol="PF_LINEAR",
-                contract_direction=direction,
-            ),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            KrakenAdapter(StubTransport(handler)).fetch(
+                instrument(
+                    "KRAKEN",
+                    symbol="PF_LINEAR",
+                    contract_direction=direction,
+                ),
+                None,
+                include_history=False,
+            )
+        )
 
 
 def test_aggregate_inverse_ticker_requires_contract_multiplier_before_request():
     transport = StubTransport(None)
     with pytest.raises(InvalidInstrument):
-        asyncio.run(KrakenAdapter(transport).fetch(
-            instrument(
-                "KRAKEN",
-                symbol="PI_INVERSE",
-                settlement_currency="BASE",
-                contract_direction=ContractDirection.INVERSE,
-                contract_multiplier=None,
-            ),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            KrakenAdapter(transport).fetch(
+                instrument(
+                    "KRAKEN",
+                    symbol="PI_INVERSE",
+                    settlement_currency="BASE",
+                    contract_direction=ContractDirection.INVERSE,
+                    contract_multiplier=None,
+                ),
+                None,
+                include_history=False,
+            )
+        )
     assert transport.requests == []
 
 
@@ -662,15 +752,17 @@ def test_aggregate_mixed_unit_ticker_rejects_invalid_payloads(mutate):
         return payload
 
     with pytest.raises(InvalidResponse):
-        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
-            instrument(
-                "KRAKEN",
-                symbol="PF_LINEAR",
-                contract_multiplier=None,
-            ),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            KrakenAdapter(StubTransport(handler)).fetch(
+                instrument(
+                    "KRAKEN",
+                    symbol="PF_LINEAR",
+                    contract_multiplier=None,
+                ),
+                None,
+                include_history=False,
+            )
+        )
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
@@ -686,15 +778,17 @@ def test_aggregate_mixed_unit_ticker_requires_one_exact_instrument_match(ambiguo
         return payload
 
     with pytest.raises(DataUnavailable):
-        asyncio.run(KrakenAdapter(StubTransport(handler)).fetch(
-            instrument(
-                "KRAKEN",
-                symbol=symbol,
-                contract_multiplier=None,
-            ),
-            None,
-            include_history=False,
-        ))
+        asyncio.run(
+            KrakenAdapter(StubTransport(handler)).fetch(
+                instrument(
+                    "KRAKEN",
+                    symbol=symbol,
+                    contract_multiplier=None,
+                ),
+                None,
+                include_history=False,
+            )
+        )
 
 
 def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
@@ -709,11 +803,13 @@ def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
         return KRAKEN_OPEN_INTEREST["tickers"]
 
     transport = StubTransport(handler)
-    result = asyncio.run(KrakenAdapter(transport, lambda: 1_200.5).fetch(
-        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
-        HistoryRange(300_000, 900_000),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(transport, lambda: 1_200.5).fetch(
+            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
 
     assert [row.timestamp_ms for row in result.history] == [
         300_000,
@@ -728,14 +824,14 @@ def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
     assert result.history_issue is None
 
     analytics_requests = [
-        params for _, url, params in transport.requests if url.endswith("/open-interest")
+        params
+        for _, url, params in transport.requests
+        if url.endswith("/open-interest")
     ]
     assert [row["since"] for row in analytics_requests] == [300, 900]
     assert all(row["to"] == 900 for row in analytics_requests)
     assert all(row["interval"] == 300 for row in analytics_requests)
-    mark_requests = [
-        params for _, url, params in transport.requests if "/mark/" in url
-    ]
+    mark_requests = [params for _, url, params in transport.requests if "/mark/" in url]
     assert [row["from"] for row in mark_requests] == [300, 900]
     assert all(row["to"] == 900 for row in mark_requests)
 
@@ -749,23 +845,27 @@ def test_contract_count_history_uses_multiplier_without_mark_requests():
         return KRAKEN_OPEN_INTEREST["tickers"]
 
     transport = StubTransport(handler)
-    result = asyncio.run(KrakenAdapter(transport, lambda: 1_200.5).fetch(
-        instrument(
-            "KRAKEN",
-            symbol="PI_INVERSE",
-            settlement_currency="BASE",
-            contract_direction=ContractDirection.INVERSE,
-            contract_multiplier=100,
-        ),
-        HistoryRange(300_000, 900_000),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(transport, lambda: 1_200.5).fetch(
+            instrument(
+                "KRAKEN",
+                symbol="PI_INVERSE",
+                settlement_currency="BASE",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=100,
+            ),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
 
     assert [row.native_value for row in result.history] == [1, 2, 3]
     assert [row.value_usd for row in result.history] == [100, 200, 300]
     assert all(row.native_unit is NativeUnit.CONTRACTS for row in result.history)
     assert all(row.mark_price is None for row in result.history)
-    assert all(row.valuation is ValuationMethod.CONTRACT_VALUE for row in result.history)
+    assert all(
+        row.valuation is ValuationMethod.CONTRACT_VALUE for row in result.history
+    )
     assert not any("/mark/" in url for _, url, _ in transport.requests)
 
 
@@ -791,11 +891,13 @@ def test_base_unit_history_reports_missing_exact_mark_joins_as_partial():
             return KRAKEN_OPEN_INTEREST["partial_marks"]
         return KRAKEN_OPEN_INTEREST["tickers"]
 
-    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
-        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
-        HistoryRange(300_000, 900_000),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
+            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
 
     assert [row.timestamp_ms for row in result.history] == [300_000, 900_000]
     assert [row.value_usd for row in result.history] == [2, 18]
@@ -814,11 +916,13 @@ def test_malformed_analytics_history_preserves_current_observation(fixture_name)
             return KRAKEN_OPEN_INTEREST[fixture_name]
         return KRAKEN_OPEN_INTEREST["tickers"]
 
-    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 600.5).fetch(
-        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
-        HistoryRange(300_000, 300_000),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(StubTransport(handler), lambda: 600.5).fetch(
+            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            HistoryRange(300_000, 300_000),
+            include_history=True,
+        )
+    )
 
     assert result.current.value_usd == 50
     assert result.history == ()
@@ -835,11 +939,13 @@ def test_history_pagination_bound_preserves_current_observation(monkeypatch):
             return KRAKEN_OPEN_INTEREST["analytics_pages"][0]
         return KRAKEN_OPEN_INTEREST["tickers"]
 
-    result = asyncio.run(KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
-        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
-        HistoryRange(300_000, 900_000),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(StubTransport(handler), lambda: 1_200.5).fetch(
+            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
 
     assert result.current.value_usd == 50
     assert result.history == ()
@@ -862,7 +968,10 @@ def test_history_lookback_is_clamped_below_native_page_ceiling():
                 "to": latest_complete // 1000,
                 "interval": 300,
             }
-            return {"result": {"timestamp": [], "data": [], "more": False}, "errors": []}
+            return {
+                "result": {"timestamp": [], "data": [], "more": False},
+                "errors": [],
+            }
         if "/mark/" in url:
             assert params == {
                 "from": expected_start // 1000,
@@ -871,14 +980,16 @@ def test_history_lookback_is_clamped_below_native_page_ceiling():
             return {"candles": [], "more_candles": False}
         return KRAKEN_OPEN_INTEREST["tickers"]
 
-    result = asyncio.run(KrakenAdapter(
-        StubTransport(handler),
-        lambda: clock_ms / 1000,
-    ).fetch(
-        instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
-        HistoryRange(0, latest_complete),
-        include_history=True,
-    ))
+    result = asyncio.run(
+        KrakenAdapter(
+            StubTransport(handler),
+            lambda: clock_ms / 1000,
+        ).fetch(
+            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            HistoryRange(0, latest_complete),
+            include_history=True,
+        )
+    )
 
     assert result.history == ()
     assert result.history_issue is None
@@ -893,9 +1004,86 @@ def test_client_requires_an_explicitly_available_adapter():
 
 def test_ccxt_symbol_resolution_requires_a_unique_contract():
     class Exchange:
-        markets_by_id = {"BASEQUOTE": [{"symbol": "BASE/QUOTE:QUOTE", "contract": True}]}
+        markets_by_id = {
+            "BASEQUOTE": [{"symbol": "BASE/QUOTE:QUOTE", "contract": True}]
+        }
 
     assert resolve_ccxt_symbol(Exchange(), instrument("VENUE")) == "BASE/QUOTE:QUOTE"
+
+
+def test_ccxt_symbol_resolution_does_not_rewrite_provider_identity():
+    class Exchange:
+        markets_by_id = {
+            "BASEQUOTE": [{"symbol": "BASE/QUOTE:QUOTE", "contract": True}]
+        }
+
+    with pytest.raises(DataUnavailable):
+        resolve_ccxt_symbol(
+            Exchange(),
+            instrument("VENUE", symbol="basequote"),
+        )
+    assert (
+        resolve_ccxt_symbol(
+            Exchange(),
+            instrument(
+                "VENUE",
+                symbol="EXACT-ENDPOINT-ID",
+                pair_symbol="BASEQUOTE",
+            ),
+        )
+        == "BASE/QUOTE:QUOTE"
+    )
+
+
+def test_specialized_aggregate_endpoint_uses_supplied_secondary_identity():
+    row = [None] * 19
+    row[1], row[15], row[18] = 1_700_000_000_000, "2", "3"
+
+    async def handler(method, url, params):
+        return [row]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        BitfinexAdapter(transport).fetch(
+            instrument(
+                "BITFINEX",
+                symbol="CATALOG-ID",
+                pair_symbol="EXACT-ENDPOINT-ID",
+            ),
+            None,
+            include_history=False,
+        )
+    )
+
+    assert result.current.value_usd == 6
+    assert transport.requests[0][2] == {"keys": "EXACT-ENDPOINT-ID"}
+
+
+def test_inverse_history_requires_explicit_pair_identity_without_rewriting_symbol():
+    async def handler(method, url, params):
+        if url.endswith("openInterest"):
+            return FIXTURE["binance"]["current"]
+        if url.endswith("premiumIndex"):
+            return FIXTURE["binance"]["mark"]
+        raise AssertionError("history must not be requested without pair identity")
+
+    result = asyncio.run(
+        BinanceAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument(
+                "BINANCE",
+                symbol="NATIVE-PERP-ID",
+                contract_direction=ContractDirection.INVERSE,
+                pair_symbol=None,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 10
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert "pair_symbol" in result.history_issue.message
 
 
 def configured_ccxt_adapter(monkeypatch, exchange):
@@ -924,11 +1112,13 @@ def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkey
     first, last = CCXT_HOURLY["history"]
     requested = HistoryRange(first["timestamp"], last["timestamp"])
 
-    result = asyncio.run(adapter.fetch(
-        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
-        requested,
-        include_history=True,
-    ))
+    result = asyncio.run(
+        adapter.fetch(
+            instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+            requested,
+            include_history=True,
+        )
+    )
 
     assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
     assert [row.timestamp_ms for row in result.history] == [
@@ -940,24 +1130,30 @@ def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkey
         first["openInterestValue"],
         last["openInterestValue"],
     ]
-    assert all(row.valuation is ValuationMethod.VENUE_REPORTED for row in result.history)
-    assert exchange.history_requests == [{
-        "symbol": CCXT_HOURLY["symbol"],
-        "timeframe": "1h",
-        "since": first["timestamp"],
-        "limit": 200,
-    }]
+    assert all(
+        row.valuation is ValuationMethod.VENUE_REPORTED for row in result.history
+    )
+    assert exchange.history_requests == [
+        {
+            "symbol": CCXT_HOURLY["symbol"],
+            "timeframe": "1h",
+            "since": first["timestamp"],
+            "limit": 200,
+        }
+    ]
 
 
 def test_ccxt_malformed_hourly_history_preserves_current(monkeypatch):
     exchange = StubCcxtExchange(CCXT_HOURLY["malformed_history"])
     adapter = configured_ccxt_adapter(monkeypatch, exchange)
 
-    result = asyncio.run(adapter.fetch(
-        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
-        None,
-        include_history=True,
-    ))
+    result = asyncio.run(
+        adapter.fetch(
+            instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+            None,
+            include_history=True,
+        )
+    )
 
     assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
     assert result.history == ()
@@ -970,11 +1166,13 @@ def test_ccxt_runtime_without_hourly_history_preserves_current(monkeypatch):
     exchange = StubCcxtExchange([], supports_history=False)
     adapter = configured_ccxt_adapter(monkeypatch, exchange)
 
-    result = asyncio.run(adapter.fetch(
-        instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
-        None,
-        include_history=True,
-    ))
+    result = asyncio.run(
+        adapter.fetch(
+            instrument("HTX", symbol=CCXT_HOURLY["market_id"]),
+            None,
+            include_history=True,
+        )
+    )
 
     assert result.current.value_usd == CCXT_HOURLY["current"]["openInterestValue"]
     assert result.history == ()

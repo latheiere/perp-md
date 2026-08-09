@@ -1,0 +1,56 @@
+= perp-md
+
+`perp-md` is the asynchronous acquisition library for perpetual-market open
+interest and funding data.
+
+== Boundary
+
+The library owns provider protocols, exact provider identity, pagination,
+source evidence, retrieval limitations, and adapter coverage declarations. It
+does not own instrument catalogs, scheduling, persistence, distribution,
+application metrics, or presentation policy.
+
+Provider-independent instrument economics, datapoint definitions, funding
+samples, open-interest values, and measurement lineage come from the public
+`crypto-derivative-markets` package through its `cdm` namespace. Adapter
+manifests embed those CDM contracts; they do not redefine them.
+
+== Public acquisition clients
+
+* `OpenInterestClient` acquires current and historical open interest.
+* `FundingClient` independently acquires current and historical funding.
+* `fetch_reference(provider_id, reference, ...)` accepts an unchanged CDM
+  `InstrumentReferenceV1`; legacy `Instrument` fetching remains compatible.
+* `assess_capability` resolves declared support from an incomplete CDM
+  reference and exact role-and-namespace identity selectors.
+* Each client's `assess_runtime` adds configured adapter feature evidence
+  without requiring consumers to copy optional-runtime method identifiers.
+* Each client's `plan_reference` adds generic retrieval shape, proven fixed
+  cadence, bounded lookback, and explicit-start requirements for schedulers.
+* The versioned funding-observation codec preserves the exact CDM sample and
+  acquisition evidence for storage or distribution without embedding provider
+  or instrument identity.
+
+== Declared coverage
+
+The `perp-md-coverage` command emits the deterministic
+`acquisition.coverage/v1` JSON manifest used by documentation tooling. The
+producer-owned JSON Schema is distributed with the package under
+`perp_md/schemas/declared-coverage-v1.schema.json` and has the stable identifier
+`urn:perp-md:schema:declared-coverage:1`.
+
+The manifest is the library's declared acquisition ceiling. Catalog listing
+coverage and deployment health are separate inputs owned by their respective
+systems.
+
+Static native product-family evidence is joined to catalog coverage only by
+exact normalized name, exact evidence context, venue, and CDM scenario. A
+runtime-scoped family template remains visible as declared acquisition
+coverage but is intentionally not treated as an exact catalog family.
+
+== Funding observation wire contract
+
+`funding_observation_to_data` and `funding_observation_from_data` encode and
+decode `urn:perp-md:schema:funding-observation:1`. The envelope embeds the CDM
+funding sample unchanged and adds only source-observation, retrieval-time,
+source-value, and supporting-mark evidence owned by acquisition.

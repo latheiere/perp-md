@@ -1,0 +1,65 @@
+{
+  "binance": {
+    "current": {"lastFundingRate": "0.0001", "time": 1700000000000},
+    "history": [
+      {"fundingTime": 1699971200000, "fundingRate": "0.00009"}
+    ],
+    "malformed_history": [
+      {"fundingTime": 1699971200000}
+    ]
+  },
+  "bybit": {
+    "current": {
+      "retCode": 0,
+      "time": 1700000000000,
+      "result": {
+        "list": [{"fundingRate": "0.0001", "fundingIntervalHour": "8"}]
+      }
+    },
+    "history": {
+      "retCode": 0,
+      "result": {
+        "list": [
+          {"fundingRateTimestamp": "1699971200000", "fundingRate": "0.00009"}
+        ]
+      }
+    },
+    "rejected_history": {"retCode": 10001, "retMsg": "unavailable"}
+  },
+  "gate": {
+    "current": {"funding_rate": "0.0001", "funding_interval": 28800},
+    "history": [{"t": 1699971200, "r": "0.00009"}]
+  },
+  "okx": {
+    "data": [
+      {"fundingTime": "1699971200000", "realizedRate": "0.00009"},
+      {"fundingTime": "1700000000000", "realizedRate": "0.0001"}
+    ]
+  },
+  "hyperliquid": [
+    {"time": 1699996400000, "fundingRate": "0.00009"},
+    {"time": 1700000000000, "fundingRate": "0.0001"}
+  ],
+  "kraken": {
+    "current": {
+      "result": "success",
+      "serverTime": "2023-11-14T22:13:20.123Z",
+      "tickers": [
+        {"symbol": "LINEAR-PERP", "markPrice": 100.0, "fundingRate": 0.01},
+        {"symbol": "INVERSE-PERP", "markPrice": 25.0, "fundingRate": -0.005}
+      ]
+    },
+    "history": {
+      "result": "success",
+      "rates": [
+        {"timestamp": "2023-11-14T20:00:00.000Z", "relativeFundingRate": 0.00009},
+        {"timestamp": "2023-11-14T16:00:00.000Z", "relativeFundingRate": 0.00008},
+        {"timestamp": "2023-11-14T19:00:00.000Z", "relativeFundingRate": 0.00007}
+      ]
+    },
+    "malformed_history": {
+      "result": "success",
+      "rates": [{"timestamp": "2023-11-14T20:00:00.000Z"}]
+    }
+  }
+}

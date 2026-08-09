@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
+from cdm import NotionalDenomination, OpenInterestMeasure, OpenInterestValueV1
 
 from perp_md import (
     ContractDirection,
@@ -32,7 +35,20 @@ def test_observation_rejects_invalid_notional(value):
 
 
 def test_zero_open_interest_is_valid():
-    assert OpenInterestObservation(1, 0).value_usd == 0
+    observation = OpenInterestObservation(1, 0)
+    assert observation.value_usd == 0
+    assert observation.notional == OpenInterestValueV1(
+        Decimal("0.0"),
+        OpenInterestMeasure.NOTIONAL,
+        NotionalDenomination.REPORTING,
+    )
+
+
+def test_zero_proven_base_quantity_is_valid_and_negative_is_rejected():
+    value = OpenInterestValueV1(Decimal("0"), OpenInterestMeasure.BASE_QUANTITY)
+    assert OpenInterestObservation(1, 0, base_quantity=value).base_quantity == value
+    with pytest.raises(InvalidResponse):
+        OpenInterestObservation(1, 0, base_quantity=object())
 
 
 def test_history_range_is_bounded_and_ordered():
