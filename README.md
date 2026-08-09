@@ -1,78 +1,76 @@
 # perp-md
 
-`perp-md` is a typed asynchronous Python library for current and historical
-perpetual-market open interest and funding. Separate clients present stable
-contracts while keeping provider protocols, pagination, validation,
-normalization evidence, and optional CCXT integration behind adapter
-boundaries.
+[![PyPI](https://img.shields.io/pypi/v/perp-md)](https://pypi.org/project/perp-md/)
+[![Python](https://img.shields.io/pypi/pyversions/perp-md)](https://pypi.org/project/perp-md/)
+[![CI](https://github.com/latheiere/perp-md/actions/workflows/ci.yml/badge.svg)](https://github.com/latheiere/perp-md/actions/workflows/ci.yml)
 
-Provider-independent economics and native-identity envelopes use the public `cdm` namespace from
-`crypto-derivative-markets`. `perp-md` owns acquisition protocols, provider
-identity requirements, source evidence, retrieval limits, and declared adapter coverage; it
-does not define a parallel instrument or datapoint vocabulary.
+Typed, asynchronous acquisition of perpetual-market open interest and funding
+for Python applications.
 
-The package contains no persistence, scheduling, catalog discovery,
-aggregation, chart policy, or application APIs. Market identity, storage, and
-observation use remain outside the library.
+`perp-md` turns provider-independent
+[CDM instrument references](https://github.com/latheiere/crypto-derivative-markets)
+into source-faithful observations. It keeps provider protocols, identity
+requirements, pagination, and acquisition evidence behind a small public API.
 
-## Status
+## Install
 
-The public API is alpha and follows Semantic Versioning.
+```sh
+pip install perp-md
+```
 
-## Behavior
+Optional CCXT fallback adapters are available through the `ccxt` extra:
 
-- `fetch_reference(provider_id, reference, ...)` accepts a CDM
-  `InstrumentReferenceV1` unchanged; the legacy `Instrument` API remains a
-  compatibility path.
-- Provider-native identities are selected by exact CDM role and namespace.
-  Missing and ambiguous selections are structured gaps; values are never
-  guessed, rewritten, or selected by input order.
-- Missing and unsupported values are never represented as zero.
-- Current observations remain usable when optional history fails.
-- Native quantities, units, marks, timestamps, and valuation methods are
-  preserved alongside normalized USD notional.
-- Proven canonical base OI quantity and reporting notional are exposed through
-  CDM `OpenInterestValueV1` values while the legacy scalar fields remain
-  available.
-- Funding observations distinguish indicative and settled rates, timestamp
-  meaning, calculation lineage, and interval evidence.
-- The versioned funding observation wire codec preserves the exact CDM sample
-  and acquisition evidence for storage or distribution without adding identity.
-- Aggregate derivative protocols use response-level source time when
-  individual market timestamps describe unrelated last-trade activity.
-- History ranges are bounded, deduplicated, ordered, and protected by finite
-  pagination limits.
-- Base-unit linear history is normalized only against exact-timestamp mark
-  candles; missing joins are reported as structured partial history.
-- History capabilities and requests use the cadence actually supported by each
-  venue protocol.
-- Runtime assessment accepts an incomplete CDM reference and reports
-  structured field-path and identity-selector issues without embedding
-  consumer or catalog concepts.
-- Optional adapter support is probed from exact installed provider methods;
-  consumers do not copy runtime feature identifiers or infer support from
-  package presence.
-- Runtime operation plans expose only generic scheduler constraints, including
-  proven fixed cadence, bounded lookback, and explicit-start requirements.
-- Versioned adapter manifests drive machine-readable coverage JSON and human
-  documentation inputs from one source.
-- Static native product families use exact catalog evidence names and contexts;
-  open-ended runtime-scoped templates are declared but never treated as exact
-  catalog matches.
-- Native adapters are preferred when registered; fallback is explicit.
-- External I/O is asynchronous, bounded, injectable, and independently
-  testable.
-- The package contains no consumer-specific storage or presentation behavior.
+```sh
+pip install "perp-md[ccxt]"
+```
 
-The complete contract is in [docs/CONTRACT.md](docs/CONTRACT.md), and package
-boundaries are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## Quick start
 
-CCXT support is optional and selected through the `ccxt` extra.
+Pass the CDM reference supplied by your instrument catalog directly to a
+client:
 
-`perp-md-coverage` writes the deterministic declared adapter coverage manifest
-as JSON. The bundled producer schema has the stable identifier
-`urn:perp-md:schema:declared-coverage:1`.
+```python
+from cdm import InstrumentReferenceV1
+from perp_md import OpenInterestClient
 
-## License
 
-Apache-2.0.
+async def current_open_interest(
+    provider_id: str,
+    reference: InstrumentReferenceV1,
+):
+    async with OpenInterestClient() as client:
+        result = await client.fetch_reference(
+            provider_id,
+            reference,
+            include_history=False,
+        )
+        return result.current
+```
+
+`FundingClient` provides the corresponding funding workflow. Both clients can
+assess runtime support and return structured metadata or identity gaps before
+acquisition. Observations retain native values, timestamps, calculation
+lineage, and normalization evidence; missing data is never represented as
+zero.
+
+## Scope
+
+The library owns market-data acquisition: provider protocols, operation-level
+identity requirements, source validation, bounded history retrieval, and
+declared adapter coverage. It does not discover instruments, persist data,
+schedule jobs, calculate application metrics, or expose a service API.
+
+See the [public contract](https://github.com/latheiere/perp-md/blob/main/docs/CONTRACT.md)
+for data and error semantics, the
+[architecture guide](https://github.com/latheiere/perp-md/blob/main/docs/ARCHITECTURE.md)
+for module boundaries, and the
+[changelog](https://github.com/latheiere/perp-md/blob/main/CHANGELOG.md) for
+release notes. `perp-md-coverage` emits the deterministic declared-coverage
+manifest for documentation and capability tooling.
+
+## Status and support
+
+The API is alpha, follows Semantic Versioning, and supports Python 3.11–3.13.
+Use [GitHub Issues](https://github.com/latheiere/perp-md/issues) for defects and
+feature requests, and [private security advisories](https://github.com/latheiere/perp-md/security/advisories/new)
+for vulnerabilities. Licensed under Apache-2.0.
