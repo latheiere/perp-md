@@ -58,6 +58,39 @@ KRAKEN_OPEN_INTEREST = json.loads(
 )
 
 
+def test_ccxt_market_initialization_closes_exchange_when_cancelled(monkeypatch):
+    started = asyncio.Event()
+    closed = False
+
+    class Exchange:
+        async def load_markets(self):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def close(self):
+            nonlocal closed
+            closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        ccxt_adapter_module.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(xt=lambda _config: exchange),
+    )
+
+    async def scenario():
+        adapter = CcxtAdapter()
+        task = asyncio.create_task(adapter._market(instrument("XT")))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert closed is True
+
+
 class StubTransport:
     def __init__(self, handler):
         self.handler = handler
