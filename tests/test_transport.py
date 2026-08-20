@@ -38,3 +38,32 @@ def test_http_transport_deduplicates_identical_concurrent_requests(monkeypatch):
 
     assert asyncio.run(scenario()) == [{"ok": True}, {"ok": True}]
     assert calls == 1
+
+
+def test_http_transport_observes_failure_after_shielded_waiter_is_cancelled():
+    reported: list[dict[str, object]] = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: reported.append(context))
+        release = asyncio.Event()
+        started = asyncio.Event()
+        transport = HttpxTransport()
+
+        async def request():
+            started.set()
+            await release.wait()
+            raise RuntimeError("transient request failure")
+
+        waiter = asyncio.create_task(transport._cached("request", request))
+        await started.wait()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await transport.close()
+
+    asyncio.run(scenario())
+
+    assert reported == []

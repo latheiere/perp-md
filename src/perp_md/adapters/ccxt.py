@@ -339,6 +339,9 @@ class CcxtAdapter:
                 )
                 try:
                     await exchange.load_markets()
+                except asyncio.CancelledError:
+                    await exchange.close()
+                    raise
                 except Exception as exc:
                     await exchange.close()
                     raise RequestError("venue market catalog failed") from exc

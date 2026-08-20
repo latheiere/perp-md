@@ -105,6 +105,7 @@ class HttpxTransport:
         if cached and now - cached[0] <= self.cache_ttl_seconds:
             return await asyncio.shield(cached[1])
         task = asyncio.create_task(factory())
+        task.add_done_callback(_observe_task_result)
         self._cache[key] = now, task
         try:
             return await asyncio.shield(task)
@@ -114,3 +115,10 @@ class HttpxTransport:
         except (httpx.HTTPError, ValueError) as exc:
             self._cache.pop(key, None)
             raise RequestError("venue request failed") from exc
+
+
+def _observe_task_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve background completion after a shielded waiter is cancelled."""
+
+    if not task.cancelled():
+        task.exception()
