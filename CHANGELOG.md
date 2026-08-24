@@ -3,6 +3,13 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.2.5 - 2026-08-24
+
+- Preserve exact settlement spacing as observed funding-window evidence when
+  historical rows omit a separately reported duration.
+- Resolve a current funding cycle from provider settlement boundaries when a
+  current snapshot omits direct interval metadata.
+
 ## 0.2.4 - 2026-08-24
 
 - Report a documented hourly funding frequency as an explicit duration when a

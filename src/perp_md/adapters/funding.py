@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from cdm import FundingIntervalV1, FundingRateKind, TemporalMode
+from cdm import FundingIntervalKind, FundingIntervalV1, FundingRateKind, TemporalMode
 
 from perp_md.adapters.native import HyperliquidAdapter
 from perp_md.errors import (
@@ -18,6 +18,7 @@ from perp_md.errors import (
 from perp_md.funding_values import (
     explicit_interval,
     funding_observation,
+    preserve_observed_intervals,
     unspecified_interval,
 )
 from perp_md.models import (
@@ -103,6 +104,16 @@ class BinanceFundingAdapter(NativeFundingAdapter):
             except Exception:
                 # Interval enrichment is independent from the valid rate snapshot.
                 interval = unspecified_interval()
+        if interval.kind is FundingIntervalKind.UNSPECIFIED:
+            try:
+                interval = await self._current_window_interval(
+                    prefix,
+                    instrument.symbol,
+                    premium.get("nextFundingTime"),
+                )
+            except Exception:
+                # Boundary enrichment is independent from the valid rate snapshot.
+                interval = unspecified_interval()
         retrieved_at_ms = int(self.clock() * 1_000)
         current = _relative_observation(
             int(premium["time"]),
@@ -139,6 +150,26 @@ class BinanceFundingAdapter(NativeFundingAdapter):
         if len(matches) != 1:
             raise InvalidResponse("provider returned ambiguous funding interval metadata")
         return _hour_interval(matches[0].get("fundingIntervalHours"))
+
+    async def _current_window_interval(
+        self, prefix: str, symbol: str, next_funding_time: Any
+    ) -> FundingIntervalV1:
+        if next_funding_time in (None, ""):
+            return unspecified_interval()
+        payload = await self.transport.get(
+            f"{prefix}/fundingRate", {"symbol": symbol, "limit": 1}
+        )
+        if not isinstance(payload, list) or len(payload) != 1:
+            raise InvalidResponse("provider returned invalid funding boundary metadata")
+        row = payload[0]
+        if not isinstance(row, dict) or row.get("fundingTime") is None:
+            raise InvalidResponse("provider omitted a funding boundary")
+        start_ms = _integer_timestamp_ms(row["fundingTime"])
+        end_ms = _integer_timestamp_ms(next_funding_time)
+        duration_ms = end_ms - start_ms
+        if duration_ms <= 0 or duration_ms % 1_000:
+            raise InvalidResponse("provider returned invalid funding boundaries")
+        return explicit_interval(duration_ms // 1_000)
 
     async def _history(
         self,
@@ -653,7 +684,7 @@ def _relative_history(
         if existing is not None and existing.rate != point.rate:
             raise InvalidResponse("provider returned conflicting settled funding rows")
         rows[timestamp] = point
-    return tuple(rows[key] for key in sorted(rows))
+    return preserve_observed_intervals(tuple(rows[key] for key in sorted(rows)))
 
 
 def _direction_category(instrument: Instrument) -> str:
