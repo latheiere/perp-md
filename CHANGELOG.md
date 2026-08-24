@@ -3,6 +3,12 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.2.4 - 2026-08-24
+
+- Report a documented hourly funding frequency as an explicit duration when a
+  continuous-accrual perpetual protocol standardizes rates and realizes
+  balances on that frequency.
+
 ## 0.2.3 - 2026-08-24
 
 - Preserve current funding intervals when native endpoints or optional-provider

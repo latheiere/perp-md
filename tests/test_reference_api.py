@@ -423,7 +423,7 @@ def test_operation_plan_exposes_fixed_history_constraints_without_route_details(
     assert plan.retrieval.requires_explicit_start is False
 
 
-def test_operation_plan_preserves_explicit_start_without_inventing_an_interval():
+def test_operation_plan_preserves_explicit_start_and_documented_frequency():
     subject = reference(
         "linear",
         native_identity(
@@ -447,7 +447,7 @@ def test_operation_plan_preserves_explicit_start_without_inventing_an_interval()
     assert plan.retrieval is not None
     assert plan.retrieval.history_scope is HistoryScope.FULL_RETAINED
     assert plan.retrieval.pagination is PaginationMode.FULL_DOWNLOAD
-    assert plan.retrieval.fixed_interval_seconds is None
+    assert plan.retrieval.fixed_interval_seconds == 3_600
     assert plan.retrieval.max_lookback_seconds is None
     assert plan.retrieval.requires_explicit_start is True
 

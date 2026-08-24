@@ -717,7 +717,7 @@ def _hyperliquid(scoped: bool) -> NativeProductMapping:
                 identity=funding_identity,
                 limitations=(
                     "current acquisition returns the latest settled rate",
-                    "the interval follows a protocol schedule rather than inferred timestamp spacing",
+                    "the funding rate settles on a documented hourly frequency",
                 ),
             ),
             _funding(
@@ -727,7 +727,7 @@ def _hyperliquid(scoped: bool) -> NativeProductMapping:
                 BOUNDED_SINGLE_PAGE,
                 identity=funding_identity,
                 limitations=(
-                    "the interval follows a protocol schedule rather than inferred timestamp spacing",
+                    "the funding rate settles on a documented hourly frequency",
                 ),
             ),
         ),
@@ -845,7 +845,7 @@ def _kraken(direction: str) -> NativeProductMapping:
                 FULL_HISTORY,
                 limitations=(
                     "an explicit history start is required",
-                    "the interval follows a protocol schedule rather than inferred timestamp spacing",
+                    "the funding rate is standardized to a documented hourly frequency",
                 ),
             ),
         ),

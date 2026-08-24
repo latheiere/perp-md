@@ -235,13 +235,14 @@ copies the CDM funding-sample schema.
 
 Every sample carries CDM `FundingIntervalV1`. Its kind is
 `explicit_duration`, `observed_window`, `protocol_schedule`, or `unspecified`.
-An explicit duration is reported only when the source supplies an unambiguous
-duration or explicitly identifies consecutive funding boundaries whose
-difference defines the interval. Raw provider fields with named time units are
-valid duration evidence even when an optional abstraction omits its normalized
-interval field. A protocol schedule is not converted into invented bounds. Regular
-spacing between history observations is not treated as interval evidence. A
-current source-reported interval is not applied retroactively to historical
+An explicit duration is reported only when the source endpoint or governing
+contract specification supplies an unambiguous rate frequency, or explicitly
+identifies consecutive funding boundaries whose difference defines the
+interval. Raw provider fields with named time units are valid duration evidence
+even when an optional abstraction omits its normalized interval field. A
+protocol schedule is not converted into invented bounds. Regular spacing
+between history observations is not treated as interval evidence. A current
+source-reported interval is not applied retroactively to historical
 observations unless the source proves that association.
 
 Funding history is ordered and deduplicated by settlement timestamp. A
