@@ -3,6 +3,14 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.2.3 - 2026-08-24
+
+- Preserve current funding intervals when native endpoints or optional-provider
+  raw payloads expose unambiguous duration evidence.
+- Acquire indicative funding snapshots separately from settled history when a
+  provider exposes distinct current and historical endpoints.
+- Use the provider's recommended global REST API domain for public requests.
+
 ## 0.2.2 - 2026-08-20
 
 - Observe cached transport task completion after shielded callers are cancelled,

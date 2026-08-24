@@ -268,6 +268,29 @@ def test_conditional_adapter_requires_explicit_runtime_evidence():
     assert available.status is CapabilityStatus.SUPPORTED
 
 
+@pytest.mark.parametrize(
+    ("provider", "runtime_features"),
+    [
+        ("BINANCE", ()),
+        ("OKX", ()),
+        ("WHITEBIT", ("ccxt.fetch_funding_rate",)),
+    ],
+)
+def test_current_funding_interval_capability_tracks_source_evidence(
+    provider: str, runtime_features: tuple[str, ...]
+):
+    assessment = assess_capability(
+        provider,
+        DataPointKind.FUNDING_INTERVAL,
+        descriptor("linear"),
+        native_identities=identity(),
+        temporal_mode=TemporalMode.CURRENT,
+        runtime_features=runtime_features,
+    )
+
+    assert assessment.status is CapabilityStatus.SUPPORTED
+
+
 def test_legacy_instrument_projection_is_a_compatibility_seam_into_cdm():
     projected = instrument_descriptor_from_instrument(
         Instrument(
@@ -295,7 +318,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.2.1"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.2.3"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )

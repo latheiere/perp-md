@@ -212,10 +212,19 @@ class CcxtFundingAdapter(CcxtAdapter):
 
     @staticmethod
     def _reported_interval(payload: dict[str, Any]) -> FundingIntervalV1:
-        raw = payload.get("interval") or payload.get("fundingInterval")
+        raw = payload.get("interval")
         if raw in (None, ""):
-            return unspecified_interval()
-        duration = _duration_seconds(raw)
+            raw = payload.get("fundingInterval")
+        duration = _duration_seconds(raw) if raw not in (None, "") else None
+        if duration is None:
+            info = payload.get("info")
+            minutes = (
+                info.get("funding_interval_minutes")
+                if isinstance(info, dict)
+                else None
+            )
+            if minutes not in (None, ""):
+                duration = _explicit_unit_duration(minutes, 60)
         return (
             explicit_interval(duration)
             if duration is not None
@@ -254,3 +263,17 @@ def _duration_seconds(value: Any) -> int | None:
                 )
             return int(duration)
     return None
+
+
+def _explicit_unit_duration(value: Any, multiplier: int) -> int:
+    if isinstance(value, bool):
+        raise InvalidResponse("optional provider returned an invalid funding interval")
+    try:
+        duration = float(value) * multiplier
+    except (TypeError, ValueError) as exc:
+        raise InvalidResponse(
+            "optional provider returned an invalid funding interval"
+        ) from exc
+    if duration <= 0 or not duration.is_integer():
+        raise InvalidResponse("optional provider returned an invalid funding interval")
+    return int(duration)

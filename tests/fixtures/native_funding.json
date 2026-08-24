@@ -1,6 +1,9 @@
 {
   "binance": {
     "current": {"lastFundingRate": "0.0001", "time": 1700000000000},
+    "funding_info": [
+      {"symbol": "BASEQUOTE", "fundingIntervalHours": 4}
+    ],
     "history": [
       {"fundingTime": 1699971200000, "fundingRate": "0.00009"}
     ],
@@ -31,10 +34,48 @@
     "history": [{"t": 1699971200, "r": "0.00009"}]
   },
   "okx": {
-    "data": [
-      {"fundingTime": "1699971200000", "realizedRate": "0.00009"},
-      {"fundingTime": "1700000000000", "realizedRate": "0.0001"}
-    ]
+    "current": {
+      "code": "0",
+      "msg": "",
+      "data": [{
+        "instId": "BASEQUOTE",
+        "fundingRate": "0.00011",
+        "fundingTime": "1700000000000",
+        "nextFundingTime": "1700014400000",
+        "ts": "1699999900000"
+      }]
+    },
+    "history": {
+      "code": "0",
+      "msg": "",
+      "data": [
+        {"fundingTime": "1699971200000", "realizedRate": "0.00009"},
+        {"fundingTime": "1700000000000", "realizedRate": "0.0001"}
+      ]
+    },
+    "malformed_current": {
+      "code": "0",
+      "msg": "",
+      "data": [{
+        "instId": "BASEQUOTE",
+        "fundingRate": "0.00011",
+        "fundingTime": "1700000000000",
+        "nextFundingTime": "1699999999000",
+        "ts": "1699999900000"
+      }]
+    },
+    "malformed_history": {
+      "code": "0",
+      "msg": "",
+      "data": [{"fundingTime": "1"}]
+    }
+  },
+  "optional": {
+    "raw_interval_minutes": {
+      "interval": null,
+      "info": {"funding_interval_minutes": "480"}
+    },
+    "malformed_interval_minutes": [true, "invalid", 0, -1, "0.01"]
   },
   "hyperliquid": [
     {"time": 1699996400000, "fundingRate": "0.00009"},
