@@ -146,7 +146,7 @@ def _capability(
     capability_id: str,
     kind: DataPointKind,
     temporal: TemporalMode,
-    source_name: str,
+    source_name: str | tuple[str, ...],
     retrieval: RetrievalDeclaration,
     *,
     state: DeclaredState = DeclaredState.SUPPORTED,
@@ -165,7 +165,10 @@ def _capability(
         lineage=None
         if state is DeclaredState.UNAVAILABLE
         else _lineage(output, *methods),
-        source_observations=(NativeName(source_name, "provider_response_field"),),
+        source_observations=tuple(
+            NativeName(name, "provider_response_field")
+            for name in ((source_name,) if isinstance(source_name, str) else source_name)
+        ),
         requirements=CapabilityRequirements(
             identity_selectors=identity,
             instrument_metadata=instrument,
@@ -393,6 +396,19 @@ def _binance(direction: str) -> NativeProductMapping:
                 DataPointKind.FUNDING_SETTLED_RATE,
                 TemporalMode.HISTORICAL,
                 BOUNDED_HISTORY,
+            ),
+            *(
+                (
+                    _capability(
+                        f"{prefix}.funding-interval.current",
+                        DataPointKind.FUNDING_INTERVAL,
+                        TemporalMode.CURRENT,
+                        "fundingIntervalHours",
+                        CURRENT,
+                    ),
+                )
+                if direction == "linear"
+                else ()
             ),
         ),
     )
@@ -649,16 +665,22 @@ def _okx(direction: str) -> NativeProductMapping:
             _notional(prefix, TemporalMode.CURRENT, CURRENT, source="oiUsd"),
             _funding(
                 prefix,
-                DataPointKind.FUNDING_SETTLED_RATE,
-                TemporalMode.SETTLED,
-                SINGLE_PAGE_HISTORY,
-                limitations=("current acquisition returns the latest settled rate",),
+                DataPointKind.FUNDING_INDICATIVE_RATE,
+                TemporalMode.CURRENT,
+                CURRENT,
             ),
             _funding(
                 prefix,
                 DataPointKind.FUNDING_SETTLED_RATE,
                 TemporalMode.HISTORICAL,
                 SINGLE_PAGE_HISTORY,
+            ),
+            _capability(
+                f"{prefix}.funding-interval.current",
+                DataPointKind.FUNDING_INTERVAL,
+                TemporalMode.CURRENT,
+                ("fundingTime", "nextFundingTime"),
+                CURRENT,
             ),
         ),
     )
@@ -944,6 +966,16 @@ def _optional_mapping(
                 RUNTIME_HISTORY,
                 state=DeclaredState.CONDITIONAL,
                 runtime=_CCXT_FUNDING_HISTORY_RUNTIME,
+                limitations=runtime_limit,
+            ),
+            _capability(
+                f"{prefix}.funding-interval.current",
+                DataPointKind.FUNDING_INTERVAL,
+                TemporalMode.CURRENT,
+                ("interval", "fundingInterval", "funding_interval_minutes"),
+                RUNTIME_CURRENT,
+                state=DeclaredState.CONDITIONAL,
+                runtime=_CCXT_FUNDING_CURRENT_RUNTIME,
                 limitations=runtime_limit,
             ),
         ),

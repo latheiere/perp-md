@@ -43,6 +43,7 @@ KRAKEN_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
 KRAKEN_FUNDING_HISTORY_URL = (
     "https://futures.kraken.com/derivatives/api/v4/historicalfundingrates"
 )
+OKX_PUBLIC_API_URL = "https://openapi.okx.com/api/v5/public"
 
 
 @dataclass
@@ -94,12 +95,20 @@ class BinanceFundingAdapter(NativeFundingAdapter):
             raise DataUnavailable(
                 "provider omitted the indicative funding rate or source time"
             )
+        interval = unspecified_interval()
+        if not inverse:
+            try:
+                interval = await self._current_interval(instrument.symbol)
+            except Exception:
+                # Interval enrichment is independent from the valid rate snapshot.
+                interval = unspecified_interval()
         retrieved_at_ms = int(self.clock() * 1_000)
         current = _relative_observation(
             int(premium["time"]),
             premium["lastFundingRate"],
             FundingRateKind.INDICATIVE,
             TemporalMode.CURRENT,
+            interval,
             retrieved_at_ms=retrieved_at_ms,
             source_observation="funding.indicative_rate",
         )
@@ -112,6 +121,23 @@ class BinanceFundingAdapter(NativeFundingAdapter):
             return FundingResult(current, rows)
         except Exception as exc:
             return FundingResult(current, history_issue=self._issue(exc))
+
+    async def _current_interval(self, symbol: str) -> FundingIntervalV1:
+        payload = await self.transport.get(
+            "https://fapi.binance.com/fapi/v1/fundingInfo"
+        )
+        if not isinstance(payload, list):
+            raise InvalidResponse("provider returned invalid funding interval metadata")
+        matches = [
+            row
+            for row in payload
+            if isinstance(row, dict) and row.get("symbol") == symbol
+        ]
+        if not matches:
+            return unspecified_interval()
+        if len(matches) != 1:
+            raise InvalidResponse("provider returned ambiguous funding interval metadata")
+        return _hour_interval(matches[0].get("fundingIntervalHours"))
 
     async def _history(
         self,
@@ -320,7 +346,7 @@ class OkxFundingAdapter(NativeFundingAdapter):
     def capabilities(self, instrument: Instrument) -> FundingCapabilities:
         return FundingCapabilities(
             True,
-            (FundingRateKind.SETTLED,),
+            (FundingRateKind.INDICATIVE, FundingRateKind.SETTLED),
             True,
         )
 
@@ -331,37 +357,43 @@ class OkxFundingAdapter(NativeFundingAdapter):
         *,
         include_history: bool,
     ) -> FundingResult:
-        params: dict[str, Any] = {
-            "instId": instrument.symbol,
-            "limit": 100 if include_history else 1,
-        }
-        payload = await self.transport.get(
-            "https://www.okx.com/api/v5/public/funding-rate-history", params
+        current_payload = await self.transport.get(
+            f"{OKX_PUBLIC_API_URL}/funding-rate",
+            {"instId": instrument.symbol},
         )
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise InvalidResponse(
-                "provider returned an invalid settled funding history"
+        current_row = _okx_row(current_payload, instrument.symbol, "current funding")
+        if current_row.get("fundingRate") is None or current_row.get("ts") is None:
+            raise DataUnavailable(
+                "provider omitted the indicative funding rate or source time"
             )
         retrieved_at_ms = int(self.clock() * 1_000)
-        all_rows = _relative_history(
-            payload["data"],
-            "fundingTime",
-            "realizedRate",
-            None,
-            temporal_mode=TemporalMode.SETTLED,
+        current = _relative_observation(
+            _integer_timestamp_ms(current_row["ts"]),
+            current_row["fundingRate"],
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            _okx_interval(current_row),
             retrieved_at_ms=retrieved_at_ms,
+            source_observation="funding.indicative_rate",
         )
-        if not all_rows:
-            raise DataUnavailable("provider returned no settled funding rate")
-        current = all_rows[-1]
-        requested_rows = _relative_history(
-            payload["data"],
-            "fundingTime",
-            "realizedRate",
-            history,
-            retrieved_at_ms=retrieved_at_ms,
-        )
-        return FundingResult(current, requested_rows if include_history else ())
+        if not include_history:
+            return FundingResult(current)
+        try:
+            payload = await self.transport.get(
+                f"{OKX_PUBLIC_API_URL}/funding-rate-history",
+                {"instId": instrument.symbol, "limit": 100},
+            )
+            _okx_payload(payload, "settled funding history")
+            requested_rows = _relative_history(
+                payload["data"],
+                "fundingTime",
+                "realizedRate",
+                history,
+                retrieved_at_ms=retrieved_at_ms,
+            )
+            return FundingResult(current, requested_rows)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
 
 
 class HyperliquidFundingAdapter(NativeFundingAdapter):
@@ -651,6 +683,54 @@ def _inverse_product(instrument: Instrument) -> bool:
 def _bybit_ok(payload: Any) -> None:
     if not isinstance(payload, dict) or str(payload.get("retCode")) != "0":
         raise InvalidResponse("provider rejected the funding request")
+
+
+def _okx_payload(payload: Any, description: str) -> None:
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("code")) != "0"
+        or not isinstance(payload.get("data"), list)
+    ):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+
+
+def _okx_row(payload: Any, symbol: str, description: str) -> dict[str, Any]:
+    _okx_payload(payload, description)
+    matches = [
+        row
+        for row in payload["data"]
+        if isinstance(row, dict) and row.get("instId") == symbol
+    ]
+    if len(matches) != 1:
+        raise DataUnavailable(
+            f"instrument does not resolve to exactly one {description} row"
+        )
+    return matches[0]
+
+
+def _okx_interval(row: dict[str, Any]) -> FundingIntervalV1:
+    start = row.get("fundingTime")
+    end = row.get("nextFundingTime")
+    if start in (None, "") or end in (None, ""):
+        return unspecified_interval()
+    start_ms = _integer_timestamp_ms(start)
+    end_ms = _integer_timestamp_ms(end)
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0 or duration_ms % 1_000:
+        raise InvalidResponse("provider returned invalid funding interval boundaries")
+    return explicit_interval(duration_ms // 1_000)
+
+
+def _integer_timestamp_ms(value: Any) -> int:
+    if isinstance(value, bool):
+        raise InvalidResponse("provider returned an invalid source timestamp")
+    try:
+        parsed = number(value)
+    except (TypeError, ValueError) as exc:
+        raise InvalidResponse("provider returned an invalid source timestamp") from exc
+    if not parsed.is_integer() or parsed < 0:
+        raise InvalidResponse("provider returned an invalid source timestamp")
+    return int(parsed)
 
 
 def _seconds_interval(value: Any) -> FundingIntervalV1:

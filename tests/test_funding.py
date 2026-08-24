@@ -15,6 +15,7 @@ from perp_md import (
     HistoryRange,
     Instrument,
     InvalidInstrument,
+    InvalidResponse,
 )
 from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.adapters.funding import (
@@ -65,6 +66,8 @@ def test_relative_current_and_settled_history_preserve_temporal_semantics():
     async def handler(method, url, params):
         if url.endswith("premiumIndex"):
             return FIXTURE["binance"]["current"]
+        if url.endswith("fundingInfo"):
+            return FIXTURE["binance"]["funding_info"]
         return FIXTURE["binance"]["history"]
 
     result = asyncio.run(
@@ -79,7 +82,8 @@ def test_relative_current_and_settled_history_preserve_temporal_semantics():
     assert result.history[0].kind is FundingRateKind.SETTLED
     assert result.history[0].sample.effective_at is not None
     assert result.history[0].sample.observed_at is None
-    assert result.current.interval.kind is FundingIntervalKind.UNSPECIFIED
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 14_400
     assert result.history[0].interval.kind is FundingIntervalKind.UNSPECIFIED
 
 
@@ -92,6 +96,8 @@ def test_regular_history_spacing_does_not_invent_an_interval():
     async def handler(method, url, params):
         if url.endswith("premiumIndex"):
             return {"lastFundingRate": "0.3", "time": 3_000}
+        if url.endswith("fundingInfo"):
+            return []
         return history
 
     result = asyncio.run(
@@ -106,10 +112,28 @@ def test_regular_history_spacing_does_not_invent_an_interval():
     )
 
 
+def test_unavailable_interval_metadata_preserves_valid_current_snapshot():
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return FIXTURE["binance"]["current"]
+        raise RuntimeError("interval endpoint unavailable")
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=False
+        )
+    )
+
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.current.interval.kind is FundingIntervalKind.UNSPECIFIED
+
+
 def test_malformed_history_preserves_current_funding():
     async def handler(method, url, params):
         if url.endswith("premiumIndex"):
             return FIXTURE["binance"]["current"]
+        if url.endswith("fundingInfo"):
+            return FIXTURE["binance"]["funding_info"]
         return FIXTURE["binance"]["malformed_history"]
 
     result = asyncio.run(
@@ -191,9 +215,54 @@ def test_endpoint_identity_requires_explicit_settlement_currency():
         )
 
 
-def test_history_only_provider_labels_latest_settlement_as_current():
+def test_current_provider_boundaries_supply_interval_without_relabeling_history():
     async def handler(method, url, params):
-        return FIXTURE["okx"]
+        if url.endswith("funding-rate-history"):
+            return FIXTURE["okx"]["history"]
+        return FIXTURE["okx"]["current"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        OkxFundingAdapter(transport).fetch(
+            instrument("OKX"), None, include_history=True
+        )
+    )
+
+    assert result.current.kind is FundingRateKind.INDICATIVE
+    assert result.current.sample.lineage.output.temporal_mode is TemporalMode.CURRENT
+    assert result.current.timestamp_ms == 1_699_999_900_000
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 14_400
+    assert all(
+        point.interval.kind is FundingIntervalKind.UNSPECIFIED
+        for point in result.history
+    )
+    assert result.history == tuple(
+        sorted(result.history, key=lambda point: point.timestamp_ms)
+    )
+    assert all(
+        url.startswith("https://openapi.okx.com/")
+        for _, url, _ in transport.requests
+    )
+
+
+def test_malformed_current_interval_boundaries_are_rejected():
+    async def handler(method, url, params):
+        return FIXTURE["okx"]["malformed_current"]
+
+    with pytest.raises(InvalidResponse, match="interval boundaries"):
+        asyncio.run(
+            OkxFundingAdapter(StubTransport(handler)).fetch(
+                instrument("OKX"), None, include_history=False
+            )
+        )
+
+
+def test_malformed_settled_history_preserves_current_snapshot():
+    async def handler(method, url, params):
+        if url.endswith("funding-rate-history"):
+            return FIXTURE["okx"]["malformed_history"]
+        return FIXTURE["okx"]["current"]
 
     result = asyncio.run(
         OkxFundingAdapter(StubTransport(handler)).fetch(
@@ -201,12 +270,10 @@ def test_history_only_provider_labels_latest_settlement_as_current():
         )
     )
 
-    assert result.current.kind is FundingRateKind.SETTLED
-    assert result.current.sample.lineage.output.temporal_mode is TemporalMode.SETTLED
-    assert result.current.timestamp_ms == 1_700_000_000_000
-    assert result.history == tuple(
-        sorted(result.history, key=lambda point: point.timestamp_ms)
-    )
+    assert result.current.kind is FundingRateKind.INDICATIVE
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
 
 
 def test_protocol_interval_is_evidence_not_timestamp_inference():
@@ -238,6 +305,25 @@ def test_optional_abstraction_does_not_invent_time_or_numeric_interval_units():
     assert observation.sample.rate == Decimal("0.0001")
     assert observation.provider_evidence.retrieved_at is not None
     assert observation.interval.kind is FundingIntervalKind.UNSPECIFIED
+
+
+def test_optional_raw_interval_with_explicit_minutes_is_preserved():
+    interval = CcxtFundingAdapter._reported_interval(
+        FIXTURE["optional"]["raw_interval_minutes"]
+    )
+
+    assert interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert interval.duration_seconds == 28_800
+
+
+@pytest.mark.parametrize(
+    "value", FIXTURE["optional"]["malformed_interval_minutes"]
+)
+def test_optional_raw_interval_rejects_invalid_minute_values(value):
+    with pytest.raises(InvalidResponse, match="invalid funding interval"):
+        CcxtFundingAdapter._reported_interval(
+            {"info": {"funding_interval_minutes": value}}
+        )
 
 
 def test_history_only_optional_runtime_keeps_settled_current_semantics():

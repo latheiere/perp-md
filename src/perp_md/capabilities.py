@@ -34,9 +34,9 @@ from perp_md.models import ContractDirection, Instrument
 
 DECLARED_COVERAGE_SCHEMA_ID = "urn:perp-md:schema:declared-coverage:1"
 COVERAGE_SCHEMA_VERSION = "acquisition.coverage/v1"
-MANIFEST_ID = "perp-md/acquisition-coverage/0.2.1"
-MANIFEST_DECLARED_AT = "2026-08-10T00:00:00Z"
-PACKAGE_VERSION = "0.2.1"
+MANIFEST_ID = "perp-md/acquisition-coverage/0.2.3"
+MANIFEST_DECLARED_AT = "2026-08-24T00:00:00Z"
+PACKAGE_VERSION = "0.2.3"
 CCXT_OPEN_INTEREST_FEATURE = "ccxt.fetch_open_interest"
 CCXT_OPEN_INTEREST_HISTORY_FEATURE = "ccxt.fetch_open_interest_history"
 CCXT_SPECIALIZED_OPEN_INTEREST_FEATURE = "ccxt.open_interest.specialized_catalog"
