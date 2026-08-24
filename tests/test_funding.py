@@ -276,7 +276,7 @@ def test_malformed_settled_history_preserves_current_snapshot():
     assert result.history_issue.code == "history_unavailable"
 
 
-def test_protocol_interval_is_evidence_not_timestamp_inference():
+def test_documented_hourly_frequency_is_explicit_interval_evidence():
     async def handler(method, url, params):
         return FIXTURE["hyperliquid"]
 
@@ -286,8 +286,8 @@ def test_protocol_interval_is_evidence_not_timestamp_inference():
         )
     )
 
-    assert result.current.interval.kind is FundingIntervalKind.PROTOCOL_SCHEDULE
-    assert result.current.interval.duration_seconds is None
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 3_600
     assert result.current.sample.lineage.output.temporal_mode is TemporalMode.SETTLED
 
 
@@ -391,6 +391,8 @@ def test_absolute_current_funding_preserves_normalization_evidence(
     )
 
     assert result.current.rate == pytest.approx(expected_rate)
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 3_600
     final_step = result.current.sample.lineage.steps[-1]
     assert final_step.kind is DerivationKind.PROVIDER_FORMULA
     assert final_step.method_id == method_id
@@ -414,7 +416,7 @@ def test_full_retained_history_requires_start_without_losing_current():
     assert result.history_issue.code == "history_range_required"
 
 
-def test_sparse_full_retained_history_is_sorted_without_interval_inference():
+def test_sparse_full_retained_history_preserves_documented_funding_frequency():
     async def handler(method, url, params):
         if url.endswith("tickers"):
             return FIXTURE["kraken"]["current"]
@@ -430,9 +432,10 @@ def test_sparse_full_retained_history_is_sorted_without_interval_inference():
 
     assert [point.rate for point in result.history] == [0.00008, 0.00007, 0.00009]
     assert all(
-        point.interval.kind is FundingIntervalKind.PROTOCOL_SCHEDULE
+        point.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
         for point in result.history
     )
+    assert all(point.interval.duration_seconds == 3_600 for point in result.history)
 
 
 def test_funding_client_is_independent_from_open_interest_client():

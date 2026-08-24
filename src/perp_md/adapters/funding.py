@@ -18,7 +18,6 @@ from perp_md.errors import (
 from perp_md.funding_values import (
     explicit_interval,
     funding_observation,
-    protocol_interval,
     unspecified_interval,
 )
 from perp_md.models import (
@@ -38,7 +37,9 @@ BINANCE_FUNDING_HISTORY_LIMIT = 1_000
 BYBIT_FUNDING_HISTORY_LIMIT = 200
 GATE_FUNDING_HISTORY_LIMIT = 1_000
 KRAKEN_FUNDING_HISTORY_MAX_ROWS = 50_000
-HYPERLIQUID_FUNDING_INTERVAL_MS = 3_600_000
+KRAKEN_FUNDING_INTERVAL_SECONDS = 3_600
+HYPERLIQUID_FUNDING_INTERVAL_SECONDS = 3_600
+HYPERLIQUID_FUNDING_INTERVAL_MS = HYPERLIQUID_FUNDING_INTERVAL_SECONDS * 1_000
 KRAKEN_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
 KRAKEN_FUNDING_HISTORY_URL = (
     "https://futures.kraken.com/derivatives/api/v4/historicalfundingrates"
@@ -405,7 +406,7 @@ class HyperliquidFundingAdapter(NativeFundingAdapter):
             True,
             (FundingRateKind.SETTLED,),
             True,
-            declared_interval=protocol_interval(),
+            declared_interval=explicit_interval(HYPERLIQUID_FUNDING_INTERVAL_SECONDS),
         )
 
     async def fetch(
@@ -431,7 +432,7 @@ class HyperliquidFundingAdapter(NativeFundingAdapter):
                 else 2 * HYPERLIQUID_FUNDING_INTERVAL_MS
             )
         )
-        interval = protocol_interval()
+        interval = explicit_interval(HYPERLIQUID_FUNDING_INTERVAL_SECONDS)
         retrieved_at_ms = int(self.clock() * 1_000)
         payload = await self.transport.post(
             "https://api.hyperliquid.xyz/info",
@@ -500,7 +501,7 @@ class KrakenFundingAdapter(NativeFundingAdapter):
             (FundingRateKind.INDICATIVE,),
             True,
             history_requires_start=True,
-            declared_interval=protocol_interval(),
+            declared_interval=explicit_interval(KRAKEN_FUNDING_INTERVAL_SECONDS),
             required_metadata=("contract_direction",),
         )
 
@@ -527,7 +528,7 @@ class KrakenFundingAdapter(NativeFundingAdapter):
             raise InvalidInstrument(
                 "contract_direction is required to normalize an absolute funding amount"
             )
-        interval = protocol_interval()
+        interval = explicit_interval(KRAKEN_FUNDING_INTERVAL_SECONDS)
         retrieved_at_ms = int(self.clock() * 1_000)
         current = funding_observation(
             source_time_ms=timestamp,
