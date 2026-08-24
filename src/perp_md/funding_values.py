@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -88,6 +89,31 @@ def explicit_interval(duration_seconds: int) -> FundingIntervalV1:
         FundingIntervalKind.EXPLICIT_DURATION,
         duration_seconds=duration_seconds,
     )
+
+
+def observed_interval(start_ms: int, end_ms: int) -> FundingIntervalV1:
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0 or duration_ms % 1_000:
+        raise InvalidResponse(
+            "funding settlement boundaries do not form a whole-second window"
+        )
+    return FundingIntervalV1(
+        FundingIntervalKind.OBSERVED_WINDOW,
+        duration_seconds=duration_ms // 1_000,
+        window_start=utc_ms(start_ms),
+    )
+
+
+def preserve_observed_intervals(
+    observations: tuple[FundingObservation, ...],
+) -> tuple[FundingObservation, ...]:
+    enriched: list[FundingObservation] = []
+    for point in observations:
+        if enriched and point.interval.kind is FundingIntervalKind.UNSPECIFIED:
+            interval = observed_interval(enriched[-1].timestamp_ms, point.timestamp_ms)
+            point = replace(point, sample=replace(point.sample, interval=interval))
+        enriched.append(point)
+    return tuple(enriched)
 
 
 def protocol_interval() -> FundingIntervalV1:

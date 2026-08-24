@@ -18,6 +18,7 @@ from perp_md.errors import (
 from perp_md.funding_values import (
     explicit_interval,
     funding_observation,
+    preserve_observed_intervals,
     unspecified_interval,
 )
 from perp_md.models import (
@@ -183,7 +184,7 @@ class CcxtFundingAdapter(CcxtAdapter):
                     "optional provider returned conflicting settled funding rows"
                 )
             rows[timestamp] = point
-        return tuple(rows[key] for key in sorted(rows))
+        return preserve_observed_intervals(tuple(rows[key] for key in sorted(rows)))
 
     @staticmethod
     def _observation(

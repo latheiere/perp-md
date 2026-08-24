@@ -87,7 +87,7 @@ def test_relative_current_and_settled_history_preserve_temporal_semantics():
     assert result.history[0].interval.kind is FundingIntervalKind.UNSPECIFIED
 
 
-def test_regular_history_spacing_does_not_invent_an_interval():
+def test_settlement_spacing_is_preserved_as_observed_window_evidence():
     history = [
         {"fundingTime": 1_000, "fundingRate": "0.1"},
         {"fundingTime": 2_000, "fundingRate": "0.2"},
@@ -106,10 +106,33 @@ def test_regular_history_spacing_does_not_invent_an_interval():
         )
     )
 
-    assert all(
-        point.interval.kind is FundingIntervalKind.UNSPECIFIED
-        for point in (result.current, *result.history)
+    assert result.current.interval.kind is FundingIntervalKind.UNSPECIFIED
+    assert result.history[0].interval.kind is FundingIntervalKind.UNSPECIFIED
+    assert result.history[1].interval.kind is FundingIntervalKind.OBSERVED_WINDOW
+    assert result.history[1].interval.duration_seconds == 1
+    assert result.history[1].interval.window_start is not None
+
+
+def test_current_settlement_boundaries_supply_cycle_duration_when_adjustment_is_absent():
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return {
+                "lastFundingRate": "0.0001",
+                "time": 28_900_000,
+                "nextFundingTime": 57_600_000,
+            }
+        if url.endswith("fundingInfo"):
+            return []
+        return [{"fundingTime": 28_800_000, "fundingRate": "0.00009"}]
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=False
+        )
     )
+
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 28_800
 
 
 def test_unavailable_interval_metadata_preserves_valid_current_snapshot():
@@ -215,7 +238,7 @@ def test_endpoint_identity_requires_explicit_settlement_currency():
         )
 
 
-def test_current_provider_boundaries_supply_interval_without_relabeling_history():
+def test_current_and_historical_provider_boundaries_preserve_distinct_evidence():
     async def handler(method, url, params):
         if url.endswith("funding-rate-history"):
             return FIXTURE["okx"]["history"]
@@ -233,10 +256,9 @@ def test_current_provider_boundaries_supply_interval_without_relabeling_history(
     assert result.current.timestamp_ms == 1_699_999_900_000
     assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
     assert result.current.interval.duration_seconds == 14_400
-    assert all(
-        point.interval.kind is FundingIntervalKind.UNSPECIFIED
-        for point in result.history
-    )
+    assert result.history[0].interval.kind is FundingIntervalKind.UNSPECIFIED
+    assert result.history[1].interval.kind is FundingIntervalKind.OBSERVED_WINDOW
+    assert result.history[1].interval.duration_seconds == 28_800
     assert result.history == tuple(
         sorted(result.history, key=lambda point: point.timestamp_ms)
     )
