@@ -3,6 +3,12 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.2.6 - 2026-08-26
+
+- Preserve funding duration evidence when source settlement boundaries carry
+  bounded millisecond jitter around nominal whole-second instants, while
+  retaining exact source timestamps and rejecting wider or ambiguous windows.
+
 ## 0.2.5 - 2026-08-24
 
 - Preserve exact settlement spacing as observed funding-window evidence when
