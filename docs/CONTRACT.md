@@ -239,9 +239,16 @@ An explicit duration is reported only when the source endpoint or governing
 contract specification supplies an unambiguous rate frequency, or explicitly
 identifies consecutive funding boundaries whose difference defines the
 interval. Raw provider fields with named time units are valid duration evidence
-even when an optional abstraction omits its normalized interval field. A
-protocol schedule is not converted into invented bounds. Regular spacing
-between history observations is not treated as interval evidence. A current
+even when an optional abstraction omits its normalized interval field. An exact
+whole-second boundary difference is accepted without requiring wall-clock
+alignment. For a non-exact difference, a provider boundary within five
+milliseconds of a nominal whole-second instant is normalized only for
+interval-duration inference; the exact source timestamp remains unchanged.
+Boundary pairs that require a wider correction, do not form a positive window,
+or cannot identify one whole-second duration unambiguously are rejected. A
+protocol schedule is not converted into invented bounds.
+Consecutive settled-history timestamps define an `observed_window`; their
+spacing is not promoted to an explicit source frequency. A current
 source-reported interval is not applied retroactively to historical
 observations unless the source proves that association.
 

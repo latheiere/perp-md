@@ -135,6 +135,92 @@ def test_current_settlement_boundaries_supply_cycle_duration_when_adjustment_is_
     assert result.current.interval.duration_seconds == 28_800
 
 
+def test_bounded_boundary_jitter_preserves_current_cycle_duration():
+    fixture = FIXTURE["boundary_windows"]["current_with_bounded_jitter"]
+
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return fixture["snapshot"]
+        if url.endswith("fundingInfo"):
+            return []
+        return fixture["latest_history"]
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=False
+        )
+    )
+
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 14_400
+
+
+def test_bounded_boundary_jitter_preserves_observed_history_duration():
+    fixture = FIXTURE["boundary_windows"]["history_with_bounded_jitter"]
+
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return FIXTURE["binance"]["current"]
+        if url.endswith("fundingInfo"):
+            return []
+        return fixture
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=True
+        )
+    )
+
+    assert result.history[1].interval.kind is FundingIntervalKind.OBSERVED_WINDOW
+    assert result.history[1].interval.duration_seconds == 14_400
+    assert result.history[1].timestamp_ms == fixture[1]["fundingTime"]
+    assert result.history[1].interval.window_start is not None
+    assert (
+        int(result.history[1].interval.window_start.timestamp() * 1_000)
+        == fixture[0]["fundingTime"]
+    )
+
+
+def test_current_cycle_boundary_jitter_outside_bound_remains_unspecified():
+    fixture = FIXTURE["boundary_windows"]["current_outside_tolerance"]
+
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return fixture["snapshot"]
+        if url.endswith("fundingInfo"):
+            return []
+        return fixture["latest_history"]
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=False
+        )
+    )
+
+    assert result.current.interval.kind is FundingIntervalKind.UNSPECIFIED
+
+
+def test_ambiguous_history_window_is_rejected_as_partial_history():
+    fixture = FIXTURE["boundary_windows"]["ambiguous_history"]
+
+    async def handler(method, url, params):
+        if url.endswith("premiumIndex"):
+            return FIXTURE["binance"]["current"]
+        if url.endswith("fundingInfo"):
+            return []
+        return fixture
+
+    result = asyncio.run(
+        BinanceFundingAdapter(StubTransport(handler)).fetch(
+            instrument("BINANCE"), None, include_history=True
+        )
+    )
+
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert "unambiguous" in result.history_issue.message
+
+
 def test_unavailable_interval_metadata_preserves_valid_current_snapshot():
     async def handler(method, url, params):
         if url.endswith("premiumIndex"):

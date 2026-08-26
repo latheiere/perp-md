@@ -22,6 +22,8 @@ from cdm import (
 from perp_md.errors import InvalidResponse
 from perp_md.models import FundingObservation, ProviderFundingEvidence
 
+_FUNDING_BOUNDARY_JITTER_TOLERANCE_MS = 5
+
 
 def funding_observation(
     *,
@@ -92,16 +94,34 @@ def explicit_interval(duration_seconds: int) -> FundingIntervalV1:
 
 
 def observed_interval(start_ms: int, end_ms: int) -> FundingIntervalV1:
-    duration_ms = end_ms - start_ms
-    if duration_ms <= 0 or duration_ms % 1_000:
-        raise InvalidResponse(
-            "funding settlement boundaries do not form a whole-second window"
-        )
     return FundingIntervalV1(
         FundingIntervalKind.OBSERVED_WINDOW,
-        duration_seconds=duration_ms // 1_000,
+        duration_seconds=funding_window_duration_seconds(start_ms, end_ms),
         window_start=utc_ms(start_ms),
     )
+
+
+def funding_window_duration_seconds(start_ms: int, end_ms: int) -> int:
+    """Return proven whole-second duration without altering source timestamps."""
+
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0:
+        raise InvalidResponse(
+            "funding interval boundaries do not form an unambiguous positive "
+            "whole-second window"
+        )
+    if duration_ms % 1_000 == 0:
+        return duration_ms // 1_000
+
+    normalized_start_ms = _nominal_whole_second_boundary(start_ms)
+    normalized_end_ms = _nominal_whole_second_boundary(end_ms)
+    normalized_duration_ms = normalized_end_ms - normalized_start_ms
+    if normalized_duration_ms <= 0 or normalized_duration_ms % 1_000:
+        raise InvalidResponse(
+            "funding interval boundaries do not form an unambiguous positive "
+            "whole-second window"
+        )
+    return normalized_duration_ms // 1_000
 
 
 def preserve_observed_intervals(
@@ -122,6 +142,19 @@ def protocol_interval() -> FundingIntervalV1:
 
 def utc_ms(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1_000, timezone.utc)
+
+
+def _nominal_whole_second_boundary(timestamp_ms: int) -> int:
+    remainder_ms = timestamp_ms % 1_000
+    if remainder_ms <= _FUNDING_BOUNDARY_JITTER_TOLERANCE_MS:
+        return timestamp_ms - remainder_ms
+    distance_to_next_second_ms = 1_000 - remainder_ms
+    if distance_to_next_second_ms <= _FUNDING_BOUNDARY_JITTER_TOLERANCE_MS:
+        return timestamp_ms + distance_to_next_second_ms
+    raise InvalidResponse(
+        "funding interval boundaries do not form an unambiguous positive "
+        "whole-second window"
+    )
 
 
 def _decimal(value: Any) -> Decimal:

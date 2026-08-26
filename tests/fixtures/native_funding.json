@@ -11,6 +11,36 @@
       {"fundingTime": 1699971200000}
     ]
   },
+  "boundary_windows": {
+    "current_with_bounded_jitter": {
+      "snapshot": {
+        "lastFundingRate": "0.0001",
+        "time": 1700014500000,
+        "nextFundingTime": 1700028800000
+      },
+      "latest_history": [
+        {"fundingTime": 1700014400005, "fundingRate": "0.00009"}
+      ]
+    },
+    "history_with_bounded_jitter": [
+      {"fundingTime": 1700000000001, "fundingRate": "0.00008"},
+      {"fundingTime": 1700014400005, "fundingRate": "0.00009"}
+    ],
+    "current_outside_tolerance": {
+      "snapshot": {
+        "lastFundingRate": "0.0001",
+        "time": 1700014500000,
+        "nextFundingTime": 1700028800000
+      },
+      "latest_history": [
+        {"fundingTime": 1700014400006, "fundingRate": "0.00009"}
+      ]
+    },
+    "ambiguous_history": [
+      {"fundingTime": 1700000000250, "fundingRate": "0.00008"},
+      {"fundingTime": 1700014400750, "fundingRate": "0.00009"}
+    ]
+  },
   "bybit": {
     "current": {
       "retCode": 0,

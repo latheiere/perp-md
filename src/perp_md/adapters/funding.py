@@ -18,6 +18,7 @@ from perp_md.errors import (
 from perp_md.funding_values import (
     explicit_interval,
     funding_observation,
+    funding_window_duration_seconds,
     preserve_observed_intervals,
     unspecified_interval,
 )
@@ -166,10 +167,9 @@ class BinanceFundingAdapter(NativeFundingAdapter):
             raise InvalidResponse("provider omitted a funding boundary")
         start_ms = _integer_timestamp_ms(row["fundingTime"])
         end_ms = _integer_timestamp_ms(next_funding_time)
-        duration_ms = end_ms - start_ms
-        if duration_ms <= 0 or duration_ms % 1_000:
-            raise InvalidResponse("provider returned invalid funding boundaries")
-        return explicit_interval(duration_ms // 1_000)
+        return explicit_interval(
+            funding_window_duration_seconds(start_ms, end_ms)
+        )
 
     async def _history(
         self,
@@ -747,10 +747,7 @@ def _okx_interval(row: dict[str, Any]) -> FundingIntervalV1:
         return unspecified_interval()
     start_ms = _integer_timestamp_ms(start)
     end_ms = _integer_timestamp_ms(end)
-    duration_ms = end_ms - start_ms
-    if duration_ms <= 0 or duration_ms % 1_000:
-        raise InvalidResponse("provider returned invalid funding interval boundaries")
-    return explicit_interval(duration_ms // 1_000)
+    return explicit_interval(funding_window_duration_seconds(start_ms, end_ms))
 
 
 def _integer_timestamp_ms(value: Any) -> int:
