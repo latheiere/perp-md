@@ -21,6 +21,10 @@ When an aggregate protocol needs a separate route and instrument identity,
 each value has its own selector. The route is supplied as a product-family
 identity and the catalog instrument is supplied as an instrument identity.
 Settlement-routed endpoints similarly require a settlement-asset identity.
+Historical derivative endpoints that route by both a pair and a provider
+contract category require separate REST pair and REST product-family
+identities. The category is passed unchanged and is never inferred from an
+expiry or catalog label.
 These are provider acquisition requirements owned by `perp-md`, while the
 identity value types and selector semantics are owned by CDM.
 
@@ -50,13 +54,19 @@ time of an individual market.
 
 `OpenInterestObservation` contains:
 
-- the source observation time in Unix milliseconds;
+- the observation time in Unix milliseconds and a typed `timestamp_kind`;
 - normalized non-negative USD notional;
 - the venue-native quantity and unit when published;
 - the mark used for conversion when applicable;
 - a valuation method describing how normalization was obtained.
 - an optional proven canonical base quantity as CDM
   `OpenInterestValueV1`.
+
+`timestamp_kind=source` means the timestamp was published for the returned OI
+snapshot or bucket. `timestamp_kind=retrieved` means the provider omitted an OI
+source time and the timestamp records only local collection. Retrieval time is
+never relabeled as provider source time. Consumers that bucket retrieved-time
+observations must retain that provenance distinction.
 
 The `notional` property presents the backward-compatible `value_usd` result as
 a CDM reporting-denominated `OpenInterestValueV1`. The scalar `value_usd` field
@@ -101,6 +111,14 @@ native quantity to a contemporaneous mark on exact source timestamps. It never
 uses the current mark for historical normalization. Missing joins produce a
 structured partial-history result.
 
+Provider-native contract analytics can expose contract-count history through
+bounded time cursors while publishing mark history independently. These paths
+page OI within a finite request bound and join only equal native bucket
+timestamps. When a provider instead publishes normalized base quantity and
+reporting notional in each OI bucket, those venue-reported values are retained
+without an unnecessary price join. Inverse contract-count history uses an
+explicit quote-notional contract multiplier and does not require a mark.
+
 Optional-provider adapters request a venue-supported native history cadence,
 and capability intervals describe that requested cadence. A documented
 record-count bound may be reported as a conservative whole-day lookback. If a
@@ -137,6 +155,12 @@ reporting-denominated OI notional, indicative funding, settled funding, and
 funding interval are independent declarations. Runtime-conditional support
 requires explicit runtime feature evidence. Support for one datapoint or
 temporal mode does not imply support for another.
+
+An optional runtime that reports only contract count can produce reporting
+notional only when the instrument supplies direction and contract value and a
+positive current mark is available. An optional runtime that reports only
+normalized notional does not thereby prove contract count or base quantity;
+those capabilities remain absent independently.
 
 `OpenInterestClient.assess_runtime` and `FundingClient.assess_runtime` probe
 the configured adapter and supply its exact proven runtime features to the
@@ -257,6 +281,13 @@ malformed or unavailable optional history preserves a valid current result and
 returns `HistoryIssue`. A full-retained history endpoint requires an explicit
 start and enforces a finite row bound; omitting the start produces a structured,
 non-retryable history issue without discarding current data.
+
+When a provider labels a published rate with a future settlement boundary, the
+sample is represented as `FundingRateKind.NEXT` with that boundary as
+`effective_at`; it is not relabeled as a currently observed indicative rate.
+Page-number and time-range funding histories are bounded independently from the
+current request, and only settlement-event rows become settled observations.
+Dense status snapshots are not reclassified as settled funding history.
 
 ## Errors
 

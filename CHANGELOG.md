@@ -3,6 +3,18 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.0 - 2026-08-28
+
+- Add documented native open-interest and funding acquisition for ranked
+  derivative venues whose optional runtime paths cannot preserve current
+  availability or source semantics.
+- Extend exact product-family coverage to proven perpetual and dated futures
+  while keeping funding inapplicable to dated contracts.
+- Distinguish provider source timestamps from local retrieval timestamps in
+  open-interest observations.
+- Preserve partial history results when bounded native pagination or exact
+  supporting-price joins cannot prove every requested bucket.
+
 ## 0.2.6 - 2026-08-26
 
 - Preserve funding duration evidence when source settlement boundaries carry

@@ -1,0 +1,72 @@
+{
+  "deepcoin": {
+    "current_oi": {"code":"0","msg":"Success","data":[{"ts":"1700000100000","oi":"100","vol":"5"}]},
+    "current_mark": {"code":"0","msg":"Success","data":[{"instType":"SWAP","instId":"BASE-QUOTE-SWAP","markPx":"20","ts":"1700000100000"}]},
+    "history_oi": {"code":"0","msg":"Success","data":[{"ts":"1700000100000","oi":"100","vol":"5"},{"ts":"1699999800000","oi":"90","vol":"4"}]},
+    "history_marks_partial": {"code":"0","msg":"Success","data":[["1700000100000","19","21","18","20","0","0"]]},
+    "malformed": {"code":"0","msg":"Success","data":{"ts":"1700000100000"}},
+    "funding_current": {"code":"0","msg":"Success","data":[{"instId":"BASEQUOTE","fundingRate":"0.0001","settleInterval":28800,"nextSettleTime":1700028800}]},
+    "funding_history": {"code":"0","msg":"Success","data":{"list":[{"instId":"BASEQUOTE","rate":"0.00008","CreateTime":1699971200,"ratePeriodSec":8}]}}
+  },
+  "kucoin": {
+    "current": {"code":"200000","data":{"symbol":"BASEQUOTEM","openInterest":"200","markPrice":"10","multiplier":"0.01"}},
+    "current_oi": {"code":"200000","data":[{"openInterest":"200","ts":1700000100000}]},
+    "history": {"code":"200000","data":[{"openInterest":"200","ts":1700000100000},{"openInterest":"190","ts":1699999800000}]},
+    "marks_partial": {"code":"200000","data":[[1700000100,"9","11","8","10","1","10"]]},
+    "malformed": {"code":"200000","data":[{"openInterest":"200"}]},
+    "funding_current": {"code":"200000","data":{"symbol":".BASEQUOTEMFPI8H","granularity":28800000,"timePoint":1700000000000,"value":"0.0001","predictedValue":"0.0002","fundingTime":1700028800000}},
+    "funding_history": {"code":"200000","data":[{"symbol":"BASEQUOTEM","fundingRate":"0.00008","timepoint":1699971200000}]}
+  },
+  "htx": {
+    "current": {"status":"ok","data":[{"volume":300,"amount":"3","value":"30","contract_code":"BASE-QUOTE"}],"ts":1700000100000},
+    "history": {"status":"ok","data":{"tick":[{"volume":290,"amount":"2.9","value":"29","ts":1699999800000}],"contract_code":"BASE-QUOTE"},"ts":1700000100000},
+    "history_missing": {"status":"ok","data":null,"ts":1700000100000},
+    "dated_linear_current": {"status":"ok","data":[{"volume":300,"amount":"3","value":"30","contract_code":"BASE-QUOTE-260101","business_type":"futures"}],"ts":1700000100000},
+    "dated_linear_history": {"status":"ok","data":{"tick":[{"volume":290,"value":"29","ts":1699999800000}],"contract_code":"BASE-QUOTE-260101","business_type":"futures"},"ts":1700000100000},
+    "dated_inverse_current": {"status":"ok","data":[{"volume":300,"amount":"3","symbol":"BASE","contract_type":"quarter","contract_code":"BASE260101"}],"ts":1700000100000},
+    "dated_inverse_history": {"status":"ok","data":{"tick":[{"volume":290,"amount_type":1,"ts":1699999800000}],"symbol":"BASE","contract_type":"quarter"},"ts":1700000100000},
+    "malformed": {"status":"ok","data":{"volume":300},"ts":1700000100000},
+    "funding_current": {"status":"ok","data":{"funding_rate":"0.0001","funding_time":"1700028800000","contract_code":"BASE-QUOTE"},"ts":1700000100000},
+    "funding_history": {"status":"ok","data":{"total_page":1,"current_page":1,"data":[{"funding_rate":"0.00008","funding_time":"1699971200000","contract_code":"BASE-QUOTE"}]},"ts":1700000100000}
+  },
+  "toobit": {
+    "current_oi": {"openInterestList":[{"size":"4","symbol":"BASE-SWAP-QUOTE"}]},
+    "current_mark": {"exchangeId":301,"symbolId":"BASE-SWAP-QUOTE","price":"5","time":1700000100000},
+    "malformed": {"openInterestList":{"size":"4"}},
+    "funding_current": [{"symbol":"BASE-SWAP-QUOTE","rate":"0.0001","period":"8H","nextFundingTime":"1700028800000"}],
+    "funding_history": [{"id":2,"symbol":"BASE-SWAP-QUOTE","settleTime":1699971200000,"settleRate":"0.00008","period":"8H"}]
+  },
+  "xt": {
+    "current": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"BASE_QUOTE","openInterest":"4","openInterestUsd":"20","time":1700000100000}},
+    "malformed": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"OTHER","openInterestUsd":"20","time":1700000100000}}
+  },
+  "phemex": {
+    "linear": {"error":null,"result":{"symbol":"BASEQUOTE","timestamp":"1700000100000000000","markPriceRp":"5","openInterestRv":"4"}},
+    "inverse": {"error":null,"result":{"symbol":"BASEQUOTE","timestamp":"1700000100000000000","markEp":50000,"openInterest":4}},
+    "malformed": {"error":null,"result":{"symbol":"BASEQUOTE","timestamp":"invalid","openInterestRv":"4"}}
+  },
+  "grvt": {
+    "current": {"result":{"event_time":"1700000100000000000","instrument":"BASE_QUOTE_Perp","mark_price":"5","open_interest":"4","funding_rate":"100","funding_interval_hours":"8","next_funding_time":"1700028800000000000"}},
+    "malformed": {"result":{"event_time":"1700000100000000000","instrument":"OTHER","mark_price":"5","open_interest":"4"}},
+    "funding_history": {"result":[{"instrument":"BASE_QUOTE_Perp","funding_rate":"80","funding_time":"1699971200000000000","funding_interval_hours":"8"}],"next":""}
+  },
+  "lighter": {
+    "current": {"code":200,"order_book_details":[{"market_id":7,"market_type":"perp","symbol":"BASE","mark_price":"5","open_interest":"4"}]},
+    "malformed": {"code":200,"order_book_details":[{"market_id":8,"market_type":"perp","symbol":"BASE","mark_price":"5","open_interest":"4"}]},
+    "funding_current": {"code":200,"funding_rates":[{"market_id":7,"exchange":"lighter","symbol":"BASE","rate":"0.0001"}]},
+    "funding_history": {"code":200,"resolution":"1h","fundings":[{"timestamp":1699971200,"value":"0.1","rate":"0.00008","direction":"long"}]}
+  },
+  "btse": {
+    "ticker": {"success":true,"code":1,"msg":"Success","time":1700000100000,"data":{"symbol":"BASE-PERP-QUOTE","openInterest":"400"}},
+    "mark": {"success":true,"code":1,"msg":"Success","time":1700000100000,"data":[{"symbol":"BASE-PERP-QUOTE","markPrice":"5"}]},
+    "malformed": {"success":true,"code":1,"msg":"Success","time":1700000100000,"data":{"symbol":"OTHER","openInterest":"400"}},
+    "funding_current": [{"symbol":"BASE-PERP-QUOTE","fundingRate":"0.0001","fundingTime":1700028800000,"fundingIntervalMinutes":480}],
+    "funding_history": {"BASE-PERP-QUOTE":[{"time":1699971200,"rate":"0.00008","symbol":"BASE-PERP-QUOTE"}]}
+  },
+  "bitfinex": {
+    "current": [["tBASEF0:QUOTEF0",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001,null,null,20,null,null,100,null,null,null,0.0005,0.0025]],
+    "history": [[1699999800000,null,19,19,null,1,null,1700028800000,0,1,null,0.00008,null,null,19,null,null,90,null,null,null,0.0005,0.0025]],
+    "malformed_history": [[1699999800000,null]],
+    "funding_current": [["tBASEF0:QUOTEF0",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001,null,null,20,null,null,100,null,null,null,0.0005,0.0025]]
+  }
+}

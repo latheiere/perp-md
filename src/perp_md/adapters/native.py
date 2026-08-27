@@ -19,6 +19,8 @@ from perp_md.errors import (
 )
 from perp_md.identity import (
     REST_DERIVATIVE_STATUS_INSTRUMENT,
+    REST_PAIR,
+    REST_PRODUCT_FAMILY,
     RPC_INSTRUMENT,
     RPC_PRODUCT_FAMILY,
     ReferenceInstrument,
@@ -31,6 +33,7 @@ from perp_md.models import (
     HistoryRange,
     Instrument,
     NativeUnit,
+    ObservationTimeKind,
     OpenInterestCapabilities,
     OpenInterestObservation,
     OpenInterestResult,
@@ -46,6 +49,10 @@ GATE_HISTORY_LIMIT = 1_000
 HISTORY_MAX_PAGES = 200
 BINANCE_HISTORY_DAYS = 30
 HISTORY_BUCKET_MS = 300_000
+BITFINEX_HISTORY_LIMIT = 5_000
+DEEPCOIN_HISTORY_LIMIT = 300
+KUCOIN_HISTORY_LIMIT = 200
+HTX_HISTORY_LIMIT = 200
 HYPERLIQUID_SCOPED_PRODUCT_FAMILY = "HIP-3"
 KRAKEN_HISTORY_DAYS = 6
 KRAKEN_HISTORY_INTERVAL_SECONDS = 300
@@ -74,7 +81,9 @@ class BinanceAdapter(NativeAdapter):
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
         required = ("contract_multiplier",) if self._inverse(instrument) else ()
-        return OpenInterestCapabilities(True, True, 300, BINANCE_HISTORY_DAYS, required)
+        return OpenInterestCapabilities(
+            True, True, 300, BINANCE_HISTORY_DAYS, required
+        )
 
     async def fetch(
         self,
@@ -95,15 +104,7 @@ class BinanceAdapter(NativeAdapter):
             else "https://fapi.binance.com/futures/data/openInterestHist"
         )
         params: dict[str, Any] = {"period": "5m", "limit": BINANCE_HISTORY_LIMIT}
-        if inverse:
-            if instrument.pair_symbol is not None:
-                params.update(
-                    {
-                        "pair": instrument.pair_symbol,
-                        "contractType": "PERPETUAL",
-                    }
-                )
-        else:
+        if not inverse:
             params["symbol"] = instrument.symbol
         oi, premium = await asyncio.gather(
             self.transport.get(f"{prefix}/openInterest", {"symbol": instrument.symbol}),
@@ -132,19 +133,33 @@ class BinanceAdapter(NativeAdapter):
             mark,
             valuation,
             proven_base_quantity(instrument, raw, native_unit),
+            ObservationTimeKind.SOURCE
+            if oi.get("time") is not None
+            else ObservationTimeKind.RETRIEVED,
         )
         if not include_history:
             return OpenInterestResult(current)
-        if inverse and instrument.pair_symbol is None:
-            return OpenInterestResult(
-                current,
-                history_issue=self._issue(
-                    InvalidInstrument(
+        try:
+            if inverse:
+                if isinstance(instrument, Instrument) and instrument.pair_symbol is None:
+                    raise InvalidInstrument(
                         "pair_symbol is required for the provider history identity"
                     )
-                ),
-            )
-        try:
+                pair = adapter_identity(
+                    instrument,
+                    REST_PAIR,
+                    legacy_value=instrument.pair_symbol,
+                )
+                contract_type = (
+                    adapter_identity(
+                        instrument,
+                        REST_PRODUCT_FAMILY,
+                        legacy_value=None,
+                    )
+                    if instrument.market_type == "future"
+                    else "PERPETUAL"
+                )
+                params.update({"pair": pair, "contractType": contract_type})
             payload = await self._history(history_url, params, history)
             rows: list[OpenInterestObservation] = []
             for row in payload:
@@ -255,21 +270,21 @@ class BybitAdapter(NativeAdapter):
         raw = (
             number(row["openInterest"]) if row.get("openInterest") is not None else None
         )
+        native_unit = NativeUnit.QUOTE if category == "inverse" else NativeUnit.BASE
         base_quantity = (
-            proven_base_quantity(instrument, raw, NativeUnit.CONTRACTS)
-            if raw is not None
+            OpenInterestValueV1(
+                Decimal(str(raw)), OpenInterestMeasure.BASE_QUANTITY
+            )
+            if raw is not None and category == "linear"
             else None
         )
         if row.get("openInterestValue") is not None:
             value = number(row["openInterestValue"])
             valuation = ValuationMethod.VENUE_REPORTED
         elif raw is not None:
-            base_value = (
-                float(base_quantity.amount) if base_quantity is not None else raw
-            )
-            value = raw if category == "inverse" else base_value * mark
+            value = raw if category == "inverse" else raw * mark
             valuation = (
-                ValuationMethod.CONTRACT_VALUE
+                ValuationMethod.VENUE_REPORTED
                 if category == "inverse"
                 else ValuationMethod.MARK_PRICE
             )
@@ -279,10 +294,13 @@ class BybitAdapter(NativeAdapter):
             int(ticker.get("time") or self.clock() * 1000),
             value,
             raw,
-            NativeUnit.CONTRACTS,
+            native_unit,
             mark,
             valuation,
             base_quantity,
+            ObservationTimeKind.SOURCE
+            if ticker.get("time") is not None
+            else ObservationTimeKind.RETRIEVED,
         )
         if not include_history:
             return OpenInterestResult(current)
@@ -311,8 +329,8 @@ class BybitAdapter(NativeAdapter):
                             timestamp,
                             native,
                             native,
-                            NativeUnit.CONTRACTS,
-                            valuation=ValuationMethod.CONTRACT_VALUE,
+                            NativeUnit.QUOTE,
+                            valuation=ValuationMethod.VENUE_REPORTED,
                         )
                     )
                     continue
@@ -320,14 +338,15 @@ class BybitAdapter(NativeAdapter):
                 if historical_mark is None:
                     missing_marks += 1
                     continue
-                base = proven_base_quantity(instrument, native, NativeUnit.CONTRACTS)
-                base_value = float(base.amount) if base is not None else native
+                base = OpenInterestValueV1(
+                    Decimal(str(native)), OpenInterestMeasure.BASE_QUANTITY
+                )
                 observations.append(
                     OpenInterestObservation(
                         timestamp,
-                        base_value * historical_mark,
+                        native * historical_mark,
                         native,
-                        NativeUnit.CONTRACTS,
+                        NativeUnit.BASE,
                         historical_mark,
                         ValuationMethod.MARK_PRICE,
                         base,
@@ -458,8 +477,8 @@ class GateAdapter(NativeAdapter):
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
         return OpenInterestCapabilities(
             True,
-            True,
-            300,
+            instrument.market_type != "future",
+            300 if instrument.market_type != "future" else None,
             required_metadata=("settlement_currency",),
         )
 
@@ -475,8 +494,9 @@ class GateAdapter(NativeAdapter):
                 "settlement_currency is required for the provider endpoint identity"
             )
         settle = instrument.settlement_currency.lower()
+        route = "delivery" if instrument.market_type == "future" else "futures"
         details = await self.transport.get(
-            f"https://api.gateio.ws/api/v4/futures/{settle}/contracts/{instrument.symbol}"
+            f"https://api.gateio.ws/api/v4/{route}/{settle}/contracts/{instrument.symbol}"
         )
         position = number(details["position_size"])
         mark = number(details["mark_price"])
@@ -502,8 +522,11 @@ class GateAdapter(NativeAdapter):
             mark,
             valuation,
             base_quantity,
+            ObservationTimeKind.RETRIEVED,
         )
         if not include_history:
+            return OpenInterestResult(current)
+        if instrument.market_type == "future":
             return OpenInterestResult(current)
         try:
             payload = await self._history(settle, instrument.symbol, history)
@@ -588,7 +611,9 @@ class BitfinexAdapter(NativeAdapter):
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
         return OpenInterestCapabilities(
-            True, False, required_metadata=("contract_direction", "contract_multiplier")
+            True,
+            True,
+            required_metadata=("contract_direction", "contract_multiplier"),
         )
 
     async def fetch(
@@ -635,12 +660,533 @@ class BitfinexAdapter(NativeAdapter):
             else ValuationMethod.CONTRACT_VALUE,
             proven_base_quantity(instrument, contracts, NativeUnit.CONTRACTS),
         )
-        return OpenInterestResult(current)
+        if not include_history:
+            return OpenInterestResult(current)
+        try:
+            rows = await self._history(endpoint_symbol, history)
+            points = tuple(self._history_observation(instrument, row) for row in rows)
+            return OpenInterestResult(current, points)
+        except Exception as exc:
+            return OpenInterestResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self, symbol: str, requested: HistoryRange | None
+    ) -> list[list[Any]]:
+        url = f"https://api-pub.bitfinex.com/v2/status/deriv/{quote(symbol, safe='')}/hist"
+        params: dict[str, Any] = {"sort": -1, "limit": BITFINEX_HISTORY_LIMIT}
+        if requested is not None and requested.start_ms is not None:
+            params["start"] = requested.start_ms
+            params["end"] = requested.end_ms or int(self.clock() * 1_000)
+        rows: dict[int, list[Any]] = {}
+        page_end = params.get("end")
+        for _ in range(HISTORY_MAX_PAGES):
+            request = dict(params)
+            if page_end is not None:
+                request["end"] = page_end
+            payload = await self.transport.get(url, request)
+            if not isinstance(payload, list):
+                raise InvalidResponse("venue returned an invalid derivative-status history")
+            if not payload:
+                return [rows[key] for key in sorted(rows)]
+            for row in payload:
+                if not isinstance(row, list) or len(row) <= 17:
+                    raise InvalidResponse("venue changed the derivative-status history shape")
+                timestamp = _integer_ms(row[0], "open-interest")
+                if requested is None or (
+                    (requested.start_ms is None or timestamp >= requested.start_ms)
+                    and (requested.end_ms is None or timestamp <= requested.end_ms)
+                ):
+                    rows[timestamp] = row
+            oldest = min(_integer_ms(row[0], "open-interest") for row in payload)
+            start = requested.start_ms if requested else None
+            if len(payload) < BITFINEX_HISTORY_LIMIT or (start is not None and oldest <= start):
+                return [rows[key] for key in sorted(rows)]
+            advanced = oldest - 1
+            if page_end is not None and advanced >= page_end:
+                raise PaginationError("open-interest history pagination did not advance")
+            page_end = advanced
+        raise PaginationError("open-interest history exceeded the bounded page limit")
+
+    @staticmethod
+    def _history_observation(
+        instrument: Instrument, row: list[Any]
+    ) -> OpenInterestObservation:
+        if row[17] is None or row[14] is None:
+            raise DataUnavailable("venue omitted historical open interest or mark price")
+        contracts, mark = number(row[17]), number(row[14])
+        return OpenInterestObservation(
+            _integer_ms(row[0], "open-interest"),
+            contract_value_usd(instrument, contracts, mark),
+            contracts,
+            NativeUnit.CONTRACTS,
+            mark,
+            ValuationMethod.MARK_PRICE
+            if instrument.contract_direction is ContractDirection.LINEAR
+            else ValuationMethod.CONTRACT_VALUE,
+            proven_base_quantity(instrument, contracts, NativeUnit.CONTRACTS),
+        )
 
 
-class OkxAdapter(NativeAdapter):
+class DeepcoinAdapter(NativeAdapter):
+    BASE_URL = "https://api.deepcoin.com/deepcoin/v2/market"
+
     def supports(self, instrument: Instrument) -> bool:
-        return instrument.venue == "OKX"
+        return instrument.venue == "DEEPCOIN"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(
+            True,
+            True,
+            300,
+            required_metadata=("contract_direction", "contract_multiplier"),
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        params = {"instId": instrument.symbol, "bar": "5m", "limit": 1}
+        oi_payload, mark_payload = await asyncio.gather(
+            self.transport.get(f"{self.BASE_URL}/open-interest-volume", params),
+            self.transport.get(
+                f"{self.BASE_URL}/mark-price",
+                {"instType": "SWAP", "instId": instrument.symbol},
+            ),
+        )
+        oi_rows = _coded_rows(oi_payload, "open-interest snapshot")
+        mark_rows = _coded_rows(mark_payload, "mark-price snapshot")
+        if len(oi_rows) != 1 or len(mark_rows) != 1:
+            raise DataUnavailable("instrument does not resolve to one current market row")
+        oi_row, mark_row = oi_rows[0], mark_rows[0]
+        timestamp = _integer_ms(oi_row.get("ts"), "open-interest")
+        current = _contract_observation(
+            instrument, timestamp, oi_row.get("oi"), mark_row.get("markPx")
+        )
+        if not include_history:
+            return OpenInterestResult(current)
+        try:
+            oi_history = await self._history(instrument, history)
+            marks = await self._marks(instrument, oi_history)
+            points, missing = _join_contract_history(instrument, oi_history, marks)
+            issue = _partial_mark_issue(missing, len(oi_history))
+            return OpenInterestResult(current, points, issue)
+        except Exception as exc:
+            return OpenInterestResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self, instrument: Instrument, requested: HistoryRange | None
+    ) -> list[dict[str, Any]]:
+        base: dict[str, Any] = {
+            "instId": instrument.symbol,
+            "bar": "5m",
+            "limit": DEEPCOIN_HISTORY_LIMIT,
+        }
+        if requested and requested.start_ms is not None:
+            base["startTime"] = requested.start_ms
+            base["endTime"] = requested.end_ms or int(self.clock() * 1_000)
+        return await _backward_dict_history(
+            self.transport,
+            f"{self.BASE_URL}/open-interest-volume",
+            base,
+            "ts",
+            DEEPCOIN_HISTORY_LIMIT,
+            requested,
+            coded=True,
+        )
+
+    async def _marks(
+        self, instrument: Instrument, rows: list[dict[str, Any]]
+    ) -> dict[int, float]:
+        if not rows:
+            return {}
+        start = min(_integer_ms(row.get("ts"), "open-interest") for row in rows)
+        end = max(_integer_ms(row.get("ts"), "open-interest") for row in rows)
+        marks: dict[int, float] = {}
+        page_end = end
+        for _ in range(HISTORY_MAX_PAGES):
+            payload = await self.transport.get(
+                f"{self.BASE_URL}/mark-price-candles",
+                {
+                    "instId": instrument.symbol,
+                    "bar": "5m",
+                    "startTime": start,
+                    "endTime": page_end,
+                    "limit": DEEPCOIN_HISTORY_LIMIT,
+                },
+            )
+            candles = _coded_rows(payload, "mark-price history", row_type=list)
+            if not candles:
+                return marks
+            timestamps: list[int] = []
+            for candle in candles:
+                if len(candle) < 5:
+                    raise InvalidResponse("venue changed the mark-price candle shape")
+                timestamp = _integer_ms(candle[0], "mark-price")
+                timestamps.append(timestamp)
+                marks[timestamp] = number(candle[4])
+            oldest = min(timestamps)
+            if len(candles) < DEEPCOIN_HISTORY_LIMIT or oldest <= start:
+                return marks
+            advanced = oldest - 1
+            if advanced >= page_end:
+                raise PaginationError("mark-price history pagination did not advance")
+            page_end = advanced
+        raise PaginationError("mark-price history exceeded the bounded page limit")
+
+
+class KucoinAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "KUCOIN"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(
+            True,
+            True,
+            300,
+            7,
+            ("contract_direction", "contract_multiplier"),
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        payload, current_payload = await asyncio.gather(
+            self.transport.get(
+                f"https://api-futures.kucoin.com/api/v1/contracts/{quote(instrument.symbol, safe='')}"
+            ),
+            self.transport.get(
+                "https://api.kucoin.com/api/ua/v1/market/open-interest",
+                {"symbol": instrument.symbol},
+            ),
+        )
+        row = _kucoin_data(payload, "contract snapshot", dict)
+        current_rows = _kucoin_data(current_payload, "open-interest snapshot", list)
+        if len(current_rows) != 1 or not isinstance(current_rows[0], dict):
+            raise DataUnavailable("instrument does not resolve to one current open-interest row")
+        current_row = current_rows[0]
+        current = _contract_observation(
+            instrument,
+            _integer_ms(current_row.get("ts"), "open-interest"),
+            current_row.get("openInterest"),
+            row.get("markPrice"),
+        )
+        if not include_history:
+            return OpenInterestResult(current)
+        try:
+            rows = await self._history(instrument, history)
+            marks = await self._marks(instrument, rows)
+            points, missing = _join_contract_history(instrument, rows, marks)
+            return OpenInterestResult(
+                current, points, _partial_mark_issue(missing, len(rows))
+            )
+        except Exception as exc:
+            return OpenInterestResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self, instrument: Instrument, requested: HistoryRange | None
+    ) -> list[dict[str, Any]]:
+        base: dict[str, Any] = {
+            "symbol": instrument.symbol,
+            "interval": "5min",
+            "pageSize": KUCOIN_HISTORY_LIMIT,
+        }
+        if requested and requested.start_ms is not None:
+            base["startAt"] = requested.start_ms
+            base["endAt"] = requested.end_ms or int(self.clock() * 1_000)
+        return await _backward_dict_history(
+            self.transport,
+            "https://api.kucoin.com/api/ua/v1/market/open-interest",
+            base,
+            "ts",
+            KUCOIN_HISTORY_LIMIT,
+            requested,
+            kucoin=True,
+        )
+
+    async def _marks(
+        self, instrument: Instrument, rows: list[dict[str, Any]]
+    ) -> dict[int, float]:
+        if not rows:
+            return {}
+        start = min(_integer_ms(row.get("ts"), "open-interest") for row in rows)
+        end = max(_integer_ms(row.get("ts"), "open-interest") for row in rows)
+        marks: dict[int, float] = {}
+        start_seconds = start // 1_000
+        page_end = end // 1_000
+        for _ in range(HISTORY_MAX_PAGES):
+            payload = await self.transport.get(
+                "https://api.kucoin.com/api/ua/v1/market/kline",
+                {
+                    "tradeType": "FUTURES",
+                    "symbol": f"{instrument.symbol}-mark-price",
+                    "interval": "5min",
+                    "startAt": start_seconds,
+                    "endAt": page_end,
+                },
+            )
+            data = _kucoin_data(payload, "mark-price history", dict)
+            candles = data.get("list")
+            if not isinstance(candles, list):
+                raise InvalidResponse("venue returned an invalid mark-price history")
+            if not candles:
+                return marks
+            timestamps: list[int] = []
+            for candle in candles:
+                if not isinstance(candle, list) or len(candle) < 5:
+                    raise InvalidResponse("venue changed the mark-price candle shape")
+                timestamp = _integer_ms(number(candle[0]) * 1_000, "mark-price")
+                timestamps.append(timestamp)
+                marks[timestamp] = number(candle[4])
+            oldest_seconds = min(timestamps) // 1_000
+            if len(candles) < KUCOIN_HISTORY_LIMIT or oldest_seconds <= start_seconds:
+                return marks
+            advanced = oldest_seconds - 1
+            if advanced >= page_end:
+                raise PaginationError("mark-price history pagination did not advance")
+            page_end = advanced
+        raise PaginationError("mark-price history exceeded the bounded page limit")
+
+
+class HtxAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "HTX"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        required = ("contract_direction",)
+        if instrument.contract_direction is ContractDirection.INVERSE:
+            required += ("contract_multiplier",)
+        return OpenInterestCapabilities(True, True, 300, required_metadata=required)
+
+    @staticmethod
+    def _prefix(instrument: Instrument) -> str:
+        if instrument.market_type == "future" and instrument.contract_direction is ContractDirection.INVERSE:
+            return "api/v1"
+        if instrument.contract_direction is ContractDirection.LINEAR:
+            return "linear-swap-api/v1"
+        if instrument.contract_direction is ContractDirection.INVERSE:
+            return "swap-api/v1"
+        raise InvalidInstrument("contract_direction is required for provider product routing")
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        prefix = self._prefix(instrument)
+        future = instrument.market_type == "future"
+        current_endpoint = (
+            "contract_open_interest"
+            if future and instrument.contract_direction is ContractDirection.INVERSE
+            else "swap_open_interest"
+        )
+        current_params: dict[str, Any] = {"contract_code": instrument.symbol}
+        if future and instrument.contract_direction is ContractDirection.LINEAR:
+            current_params["business_type"] = "futures"
+        payload = await self.transport.get(
+            f"https://api.hbdm.com/{prefix}/{current_endpoint}",
+            current_params,
+        )
+        rows, source_time = _htx_rows(payload, "open-interest snapshot")
+        if len(rows) != 1:
+            raise DataUnavailable("instrument does not resolve to one open-interest row")
+        current = _htx_observation(instrument, rows[0], source_time)
+        if not include_history:
+            return OpenInterestResult(current)
+        if future and instrument.contract_direction is ContractDirection.INVERSE:
+            current_row = rows[0]
+            if current_row.get("symbol") is None or current_row.get("contract_type") is None:
+                return OpenInterestResult(
+                    current,
+                    history_issue=self._issue(
+                        InvalidResponse(
+                            "venue omitted the dated history identity from current open interest"
+                        )
+                    ),
+                )
+            try:
+                hist = await self.transport.get(
+                    "https://api.hbdm.com/api/v1/contract_his_open_interest",
+                    {
+                        "symbol": current_row["symbol"],
+                        "contract_type": current_row["contract_type"],
+                        "period": "60min",
+                        "size": HTX_HISTORY_LIMIT,
+                        "amount_type": 1,
+                    },
+                )
+                history_rows = _htx_history_rows(hist, history)
+                return OpenInterestResult(
+                    current,
+                    tuple(
+                        _htx_observation(instrument, row, int(row["ts"]))
+                        for row in history_rows
+                    ),
+                )
+            except Exception as exc:
+                return OpenInterestResult(current, history_issue=self._issue(exc))
+        try:
+            history_params: dict[str, Any] = {
+                "contract_code": instrument.symbol,
+                "period": "5min",
+                "size": HTX_HISTORY_LIMIT,
+                "amount_type": 1,
+            }
+            if future:
+                history_params["business_type"] = "futures"
+            hist = await self.transport.get(
+                f"https://api.hbdm.com/{prefix}/swap_his_open_interest",
+                history_params,
+            )
+            history_rows = _htx_history_rows(hist, history)
+            return OpenInterestResult(
+                current,
+                tuple(_htx_observation(instrument, row, int(row["ts"])) for row in history_rows),
+            )
+        except Exception as exc:
+            return OpenInterestResult(current, history_issue=self._issue(exc))
+
+
+class ToobitAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "TOOBIT"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(True, False)
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        oi_payload, mark = await asyncio.gather(
+            self.transport.get(
+                "https://api.toobit.com/quote/v1/openInterest",
+                {"symbol": instrument.symbol},
+            ),
+            self.transport.get(
+                "https://api.toobit.com/quote/v1/markPrice",
+                {"symbol": instrument.symbol},
+            ),
+        )
+        if not isinstance(oi_payload, dict) or not isinstance(
+            oi_payload.get("openInterestList"), list
+        ):
+            raise InvalidResponse("venue returned an invalid open-interest snapshot")
+        rows = oi_payload["openInterestList"]
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise DataUnavailable("instrument does not resolve to one open-interest row")
+        if not isinstance(mark, dict):
+            raise InvalidResponse("venue returned an invalid mark-price snapshot")
+        row = rows[0]
+        _require_identity(row, "symbol", instrument.symbol)
+        _require_identity(mark, "symbolId", instrument.symbol)
+        return OpenInterestResult(
+            _base_observation(
+                int(self.clock() * 1_000),
+                row.get("size"),
+                mark.get("price"),
+                timestamp_kind=ObservationTimeKind.RETRIEVED,
+            )
+        )
+
+
+class PhemexAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "PHEMEX"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        required = (
+            ("contract_multiplier",)
+            if instrument.contract_direction is ContractDirection.INVERSE
+            else ()
+        )
+        return OpenInterestCapabilities(True, False, required_metadata=required)
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        inverse = instrument.contract_direction is ContractDirection.INVERSE
+        payload = await self.transport.get(
+            f"https://api.phemex.com/md/v{'1' if inverse else '2'}/ticker/24hr",
+            {"symbol": instrument.symbol},
+        )
+        if (
+            not isinstance(payload, dict)
+            or payload.get("error") is not None
+            or not isinstance(payload.get("result"), dict)
+        ):
+            raise InvalidResponse("venue returned an invalid open-interest snapshot")
+        row = payload["result"]
+        _require_identity(row, "symbol", instrument.symbol)
+        timestamp_ns = number(row.get("timestamp"))
+        if timestamp_ns < 0 or not timestamp_ns.is_integer():
+            raise InvalidResponse("venue returned an invalid open-interest source timestamp")
+        timestamp = int(timestamp_ns) // 1_000_000
+        if inverse:
+            return OpenInterestResult(
+                _inverse_contract_observation(
+                    instrument, timestamp, row.get("openInterest")
+                )
+            )
+        return OpenInterestResult(
+            _base_observation(timestamp, row.get("openInterestRv"), row.get("markPriceRp"))
+        )
+
+
+class GrvtAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "GRVT"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(True, False)
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        if instrument.market_type not in ("perpetual", "future"):
+            raise InvalidInstrument("provider open interest supports futures contracts only")
+        payload = await self.transport.post(
+            "https://market-data.grvt.io/full/v1/ticker",
+            {"instrument": instrument.symbol},
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
+            raise InvalidResponse("venue returned an invalid open-interest snapshot")
+        row = payload["result"]
+        _require_identity(row, "instrument", instrument.symbol)
+        timestamp_ns = number(row.get("event_time"))
+        if timestamp_ns < 0 or not timestamp_ns.is_integer():
+            raise InvalidResponse("venue returned an invalid open-interest source timestamp")
+        return OpenInterestResult(
+            _base_observation(
+                int(timestamp_ns) // 1_000_000,
+                row.get("open_interest"),
+                row.get("mark_price"),
+            )
+        )
+
+
+class LighterAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "LIGHTER"
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
         return OpenInterestCapabilities(True, False)
@@ -653,8 +1199,143 @@ class OkxAdapter(NativeAdapter):
         include_history: bool,
     ) -> OpenInterestResult:
         payload = await self.transport.get(
+            "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails",
+            {"market_id": instrument.symbol},
+        )
+        if (
+            not isinstance(payload, dict)
+            or payload.get("code") != 200
+            or not isinstance(payload.get("order_book_details"), list)
+        ):
+            raise InvalidResponse("venue returned an invalid open-interest snapshot")
+        rows = payload["order_book_details"]
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise DataUnavailable("instrument does not resolve to one open-interest row")
+        row = rows[0]
+        if str(row.get("market_id")) != instrument.symbol:
+            raise InvalidResponse("venue returned a mismatched instrument identity")
+        if row.get("market_type") != "perp":
+            raise InvalidInstrument("provider market identity is not a perpetual contract")
+        return OpenInterestResult(
+            _base_observation(
+                int(self.clock() * 1_000),
+                row.get("open_interest"),
+                row.get("mark_price"),
+                timestamp_kind=ObservationTimeKind.RETRIEVED,
+            )
+        )
+
+
+class BtseAdapter(NativeAdapter):
+    BASE_URL = "https://api.btse.com/public-api/market/v1/ticker"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "BTSE"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(
+            True, False, required_metadata=("contract_multiplier",)
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        ticker_payload, index_payload = await asyncio.gather(
+            self.transport.get(
+                f"{self.BASE_URL}/24hr", {"symbol": instrument.symbol}
+            ),
+            self.transport.get(
+                f"{self.BASE_URL}/indices", {"symbol": instrument.symbol}
+            ),
+        )
+        ticker_rows, timestamp = _btse_rows(ticker_payload, "open-interest snapshot")
+        index_rows, _ = _btse_rows(index_payload, "mark-price snapshot")
+        if len(ticker_rows) != 1 or len(index_rows) != 1:
+            raise DataUnavailable("instrument does not resolve to one current market row")
+        ticker, index = ticker_rows[0], index_rows[0]
+        _require_identity(ticker, "symbol", instrument.symbol)
+        _require_identity(index, "symbol", instrument.symbol)
+        return OpenInterestResult(
+            _contract_observation(
+                instrument,
+                timestamp,
+                ticker.get("openInterest"),
+                index.get("markPrice"),
+            )
+        )
+
+
+class XtAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "XT"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(
+            True, False, required_metadata=("contract_direction",)
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        if instrument.contract_direction is ContractDirection.LINEAR:
+            host = "https://fapi.xt.com"
+        elif instrument.contract_direction is ContractDirection.INVERSE:
+            host = "https://dapi.xt.com"
+        else:
+            raise InvalidInstrument(
+                "contract_direction is required for provider product routing"
+            )
+        payload = await self.transport.get(
+            f"{host}/future/market/v1/public/contract/open-interest",
+            {"symbol": instrument.symbol},
+        )
+        if (
+            not isinstance(payload, dict)
+            or str(payload.get("returnCode")) != "0"
+            or not isinstance(payload.get("result"), dict)
+        ):
+            raise InvalidResponse("provider returned an invalid open-interest snapshot")
+        row = payload["result"]
+        _require_identity(row, "symbol", instrument.symbol)
+        if row.get("openInterestUsd") in (None, "") or row.get("time") is None:
+            raise DataUnavailable(
+                "provider omitted open-interest notional or source time"
+            )
+        return OpenInterestResult(
+            OpenInterestObservation(
+                _integer_ms(row["time"], "open-interest"),
+                number(row["openInterestUsd"]),
+                valuation=ValuationMethod.VENUE_REPORTED,
+            )
+        )
+
+
+class OkxAdapter(NativeAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "OKX"
+
+    def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        return OpenInterestCapabilities(True, True, 300)
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> OpenInterestResult:
+        inst_type = "FUTURES" if instrument.market_type == "future" else "SWAP"
+        payload = await self.transport.get(
             "https://www.okx.com/api/v5/public/open-interest",
-            {"instType": "SWAP", "instId": instrument.symbol},
+            {"instType": inst_type, "instId": instrument.symbol},
         )
         rows = payload.get("data", []) if isinstance(payload, dict) else []
         if not rows:
@@ -668,19 +1349,87 @@ class OkxAdapter(NativeAdapter):
         else:
             raise DataUnavailable("venue omitted normalized open interest")
         native = number(row["oi"]) if row.get("oi") not in (None, "") else None
-        return OpenInterestResult(
-            OpenInterestObservation(
+        base = (
+            OpenInterestValueV1(
+                Decimal(str(number(row["oiCcy"]))),
+                OpenInterestMeasure.BASE_QUANTITY,
+            )
+            if row.get("oiCcy") not in (None, "")
+            else None
+        )
+        current = OpenInterestObservation(
                 int(row.get("ts") or self.clock() * 1000),
                 value,
                 native,
                 NativeUnit.CONTRACTS if native is not None else None,
                 mark,
                 valuation,
-                proven_base_quantity(instrument, native, NativeUnit.CONTRACTS)
-                if native is not None
-                else None,
+                base,
+                ObservationTimeKind.SOURCE
+                if row.get("ts") is not None
+                else ObservationTimeKind.RETRIEVED,
             )
-        )
+        if not include_history:
+            return OpenInterestResult(current)
+        try:
+            rows = await self._history(instrument, history)
+            observations = tuple(
+                OpenInterestObservation(
+                    int(item[0]),
+                    number(item[1]),
+                    base_quantity=OpenInterestValueV1(
+                        Decimal(str(number(item[2]))),
+                        OpenInterestMeasure.BASE_QUANTITY,
+                    ),
+                )
+                for item in rows
+            )
+            return OpenInterestResult(current, observations)
+        except Exception as exc:
+            return OpenInterestResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self, instrument: Instrument, requested: HistoryRange | None
+    ) -> list[list[Any]]:
+        params: dict[str, Any] = {
+            "instId": instrument.symbol,
+            "period": "5m",
+            "limit": 100,
+        }
+        if requested and requested.start_ms is not None:
+            params["begin"] = requested.start_ms
+        if requested and requested.end_ms is not None:
+            params["end"] = requested.end_ms
+        normalized: dict[int, list[Any]] = {}
+        cursor_end = params.get("end")
+        for _ in range(HISTORY_MAX_PAGES):
+            request = {**params, **({"end": cursor_end} if cursor_end is not None else {})}
+            payload = await self.transport.get(
+                "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history",
+                request,
+            )
+            if not isinstance(payload, dict) or str(payload.get("code")) != "0" or not isinstance(payload.get("data"), list):
+                raise InvalidResponse("venue returned an invalid open-interest history")
+            page = payload["data"]
+            if any(not isinstance(item, list) or len(item) < 3 for item in page):
+                raise InvalidResponse("venue returned an invalid open-interest history row")
+            for item in page:
+                timestamp = int(item[0])
+                if requested and requested.start_ms is not None and timestamp < requested.start_ms:
+                    continue
+                if requested and requested.end_ms is not None and timestamp > requested.end_ms:
+                    continue
+                normalized[timestamp] = item
+            if len(page) < 100:
+                return [normalized[key] for key in sorted(normalized)]
+            oldest = min(int(item[0]) for item in page)
+            if requested and requested.start_ms is not None and oldest <= requested.start_ms:
+                return [normalized[key] for key in sorted(normalized)]
+            advanced = oldest - 1
+            if cursor_end is not None and advanced >= cursor_end:
+                raise PaginationError("open-interest history pagination did not advance")
+            cursor_end = advanced
+        raise PaginationError("open-interest history exceeded the bounded page limit")
 
 
 class HyperliquidAdapter(NativeAdapter):
@@ -745,6 +1494,7 @@ class HyperliquidAdapter(NativeAdapter):
                 mark,
                 ValuationMethod.MARK_PRICE,
                 proven_base_quantity(instrument, native, NativeUnit.BASE),
+                ObservationTimeKind.RETRIEVED,
             )
         )
 
@@ -1265,6 +2015,15 @@ def native_adapters(transport: JsonTransport) -> dict[str, NativeAdapter]:
         BybitAdapter(transport),
         GateAdapter(transport),
         BitfinexAdapter(transport),
+        DeepcoinAdapter(transport),
+        KucoinAdapter(transport),
+        HtxAdapter(transport),
+        ToobitAdapter(transport),
+        PhemexAdapter(transport),
+        GrvtAdapter(transport),
+        LighterAdapter(transport),
+        BtseAdapter(transport),
+        XtAdapter(transport),
         OkxAdapter(transport),
         HyperliquidAdapter(transport),
         MexcAdapter(transport),
@@ -1281,8 +2040,274 @@ def _supported_venues(adapter: NativeAdapter) -> tuple[str, ...]:
         BybitAdapter: ("BYBIT",),
         GateAdapter: ("GATE",),
         BitfinexAdapter: ("BITFINEX",),
+        DeepcoinAdapter: ("DEEPCOIN",),
+        KucoinAdapter: ("KUCOIN",),
+        HtxAdapter: ("HTX",),
+        ToobitAdapter: ("TOOBIT",),
+        PhemexAdapter: ("PHEMEX",),
+        GrvtAdapter: ("GRVT",),
+        LighterAdapter: ("LIGHTER",),
+        BtseAdapter: ("BTSE",),
+        XtAdapter: ("XT",),
         OkxAdapter: ("OKX",),
         HyperliquidAdapter: ("HYPERLIQUID",),
         MexcAdapter: ("MEXC",),
         KrakenAdapter: ("KRAKEN",),
     }[type(adapter)]
+
+
+def _integer_ms(value: Any, metric: str) -> int:
+    parsed = number(value)
+    if parsed < 0 or not parsed.is_integer():
+        raise InvalidResponse(f"venue returned an invalid {metric} source timestamp")
+    return int(parsed)
+
+
+def _require_identity(row: dict[str, Any], field: str, expected: str) -> None:
+    if row.get(field) != expected:
+        raise InvalidResponse("venue returned a mismatched instrument identity")
+
+
+def _btse_rows(payload: Any, description: str) -> tuple[list[dict[str, Any]], int]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or not isinstance(payload.get("data"), (dict, list))
+    ):
+        raise InvalidResponse(f"venue returned an invalid {description}")
+    data = payload["data"]
+    rows = data if isinstance(data, list) else [data]
+    if any(not isinstance(row, dict) for row in rows):
+        raise InvalidResponse(f"venue returned an invalid {description}")
+    return rows, _integer_ms(payload.get("time"), description)
+
+
+def _base_observation(
+    timestamp: int,
+    raw_value: Any,
+    mark_value: Any,
+    *,
+    timestamp_kind: ObservationTimeKind = ObservationTimeKind.SOURCE,
+) -> OpenInterestObservation:
+    native = number(raw_value)
+    mark = number(mark_value)
+    return OpenInterestObservation(
+        timestamp,
+        native * mark,
+        native,
+        NativeUnit.BASE,
+        mark,
+        ValuationMethod.MARK_PRICE,
+        OpenInterestValueV1(
+            Decimal(str(native)), OpenInterestMeasure.BASE_QUANTITY
+        ),
+        timestamp_kind,
+    )
+
+
+def _inverse_contract_observation(
+    instrument: Instrument, timestamp: int, raw_value: Any
+) -> OpenInterestObservation:
+    contracts = number(raw_value)
+    return OpenInterestObservation(
+        timestamp,
+        contract_value_usd(instrument, contracts, None),
+        contracts,
+        NativeUnit.CONTRACTS,
+        valuation=ValuationMethod.CONTRACT_VALUE,
+    )
+
+
+
+
+def _coded_rows(
+    payload: Any, description: str, *, row_type: type = dict
+) -> list[Any]:
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("code")) != "0"
+        or not isinstance(payload.get("data"), list)
+        or any(not isinstance(row, row_type) for row in payload["data"])
+    ):
+        raise InvalidResponse(f"venue returned an invalid {description}")
+    return payload["data"]
+
+
+def _kucoin_data(payload: Any, description: str, expected: type) -> Any:
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("code")) != "200000"
+        or not isinstance(payload.get("data"), expected)
+    ):
+        raise InvalidResponse(f"venue returned an invalid {description}")
+    return payload["data"]
+
+
+def _contract_observation(
+    instrument: Instrument, timestamp: int, raw_value: Any, mark_value: Any
+) -> OpenInterestObservation:
+    raw, mark = number(raw_value), number(mark_value)
+    if raw < 0 or mark <= 0:
+        raise InvalidResponse("venue returned invalid open interest or mark price")
+    return OpenInterestObservation(
+        timestamp,
+        contract_value_usd(instrument, raw, mark),
+        raw,
+        NativeUnit.CONTRACTS,
+        mark,
+        ValuationMethod.MARK_PRICE
+        if instrument.contract_direction is ContractDirection.LINEAR
+        else ValuationMethod.CONTRACT_VALUE,
+        proven_base_quantity(instrument, raw, NativeUnit.CONTRACTS),
+    )
+
+
+def _join_contract_history(
+    instrument: Instrument,
+    rows: list[dict[str, Any]],
+    marks: dict[int, float],
+) -> tuple[tuple[OpenInterestObservation, ...], int]:
+    points: list[OpenInterestObservation] = []
+    missing = 0
+    for row in rows:
+        timestamp = _integer_ms(row.get("ts"), "open-interest")
+        raw = row.get("oi", row.get("openInterest"))
+        if instrument.contract_direction is ContractDirection.INVERSE:
+            contracts = number(raw)
+            points.append(
+                OpenInterestObservation(
+                    timestamp,
+                    contract_value_usd(instrument, contracts, None),
+                    contracts,
+                    NativeUnit.CONTRACTS,
+                    valuation=ValuationMethod.CONTRACT_VALUE,
+                )
+            )
+            continue
+        mark = marks.get(timestamp)
+        if mark is None:
+            missing += 1
+            continue
+        points.append(_contract_observation(instrument, timestamp, raw, mark))
+    return tuple(points), missing
+
+
+def _partial_mark_issue(missing: int, total: int) -> HistoryIssue | None:
+    if not missing:
+        return None
+    return HistoryIssue(
+        "history_partial",
+        f"mark-price history omitted {missing} of {total} open-interest buckets",
+    )
+
+
+async def _backward_dict_history(
+    transport: JsonTransport,
+    url: str,
+    base: dict[str, Any],
+    timestamp_field: str,
+    limit: int,
+    requested: HistoryRange | None,
+    *,
+    coded: bool = False,
+    kucoin: bool = False,
+) -> list[dict[str, Any]]:
+    rows: dict[int, dict[str, Any]] = {}
+    page_end = base.get("endTime", base.get("endAt"))
+    for _ in range(HISTORY_MAX_PAGES):
+        request = dict(base)
+        if page_end is not None:
+            request["endAt" if kucoin else "endTime"] = page_end
+        payload = await transport.get(url, request)
+        page = (
+            _coded_rows(payload, "open-interest history")
+            if coded
+            else _kucoin_data(payload, "open-interest history", list)
+        )
+        if any(not isinstance(row, dict) for row in page):
+            raise InvalidResponse("venue returned an invalid open-interest history row")
+        if not page:
+            return [rows[key] for key in sorted(rows)]
+        timestamps = [_integer_ms(row.get(timestamp_field), "open-interest") for row in page]
+        start = requested.start_ms if requested else None
+        end = requested.end_ms if requested else None
+        for timestamp, row in zip(timestamps, page):
+            if (start is None or timestamp >= start) and (end is None or timestamp <= end):
+                rows[timestamp] = row
+        oldest = min(timestamps)
+        if len(page) < limit or (start is not None and oldest <= start):
+            return [rows[key] for key in sorted(rows)]
+        advanced = oldest - 1
+        if page_end is not None and advanced >= page_end:
+            raise PaginationError("open-interest history pagination did not advance")
+        page_end = advanced
+    raise PaginationError("open-interest history exceeded the bounded page limit")
+
+
+def _htx_rows(payload: Any, description: str) -> tuple[list[dict[str, Any]], int]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != "ok"
+        or not isinstance(payload.get("data"), list)
+        or any(not isinstance(row, dict) for row in payload["data"])
+    ):
+        raise InvalidResponse(f"venue returned an invalid {description}")
+    return payload["data"], _integer_ms(payload.get("ts"), description)
+
+
+def _htx_observation(
+    instrument: Instrument, row: dict[str, Any], timestamp: int
+) -> OpenInterestObservation:
+    contracts = number(row.get("volume"))
+    if contracts < 0:
+        raise InvalidResponse("venue returned negative open interest")
+    amount = row.get("amount")
+    value = row.get("value")
+    if instrument.contract_direction is ContractDirection.LINEAR:
+        if value is None:
+            raise DataUnavailable("venue omitted normalized linear open interest")
+        notional = number(value)
+        base_amount = (
+            number(amount)
+            if amount is not None
+            else contracts * number(instrument.contract_multiplier)
+        )
+        base_quantity = OpenInterestValueV1(
+            Decimal(str(base_amount)), OpenInterestMeasure.BASE_QUANTITY
+        )
+        valuation = ValuationMethod.VENUE_REPORTED
+    elif instrument.contract_direction is ContractDirection.INVERSE:
+        notional = contract_value_usd(instrument, contracts, None)
+        base_quantity = None
+        valuation = ValuationMethod.CONTRACT_VALUE
+    else:
+        raise InvalidInstrument("contract_direction is required for provider product routing")
+    return OpenInterestObservation(
+        timestamp,
+        notional,
+        contracts,
+        NativeUnit.CONTRACTS,
+        valuation=valuation,
+        base_quantity=base_quantity,
+    )
+
+
+def _htx_history_rows(
+    payload: Any, requested: HistoryRange | None
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        raise InvalidResponse("venue rejected the open-interest history request")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("tick"), list):
+        raise DataUnavailable("venue returned no open-interest history")
+    rows: dict[int, dict[str, Any]] = {}
+    for row in data["tick"]:
+        if not isinstance(row, dict):
+            raise InvalidResponse("venue returned an invalid open-interest history row")
+        timestamp = _integer_ms(row.get("ts"), "open-interest")
+        if requested is None or (
+            (requested.start_ms is None or timestamp >= requested.start_ms)
+            and (requested.end_ms is None or timestamp <= requested.end_ms)
+        ):
+            rows[timestamp] = row
+    return [rows[key] for key in sorted(rows)]

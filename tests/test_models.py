@@ -12,6 +12,7 @@ from perp_md import (
     InvalidInstrument,
     InvalidResponse,
     OpenInterestObservation,
+    ObservationTimeKind,
     find_resume_time,
 )
 
@@ -42,6 +43,16 @@ def test_zero_open_interest_is_valid():
         OpenInterestMeasure.NOTIONAL,
         NotionalDenomination.REPORTING,
     )
+
+
+def test_observation_time_provenance_distinguishes_source_from_retrieval():
+    assert OpenInterestObservation(1, 0).timestamp_kind is ObservationTimeKind.SOURCE
+    retrieved = OpenInterestObservation(
+        1, 0, timestamp_kind=ObservationTimeKind.RETRIEVED
+    )
+    assert retrieved.timestamp_kind is ObservationTimeKind.RETRIEVED
+    with pytest.raises(InvalidResponse):
+        OpenInterestObservation(1, 0, timestamp_kind="source")
 
 
 def test_zero_proven_base_quantity_is_valid_and_negative_is_rejected():

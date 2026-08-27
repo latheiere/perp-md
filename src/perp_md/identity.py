@@ -31,6 +31,10 @@ REST_PAIR = NativeIdentitySelectorV1(
     NativeIdentityRole.PAIR,
     NativeIdentityNamespace.REST,
 )
+REST_PRODUCT_FAMILY = NativeIdentitySelectorV1(
+    NativeIdentityRole.PRODUCT_FAMILY,
+    NativeIdentityNamespace.REST,
+)
 REST_INSTRUMENT_CATALOG_INSTRUMENT = NativeIdentitySelectorV1(
     NativeIdentityRole.INSTRUMENT,
     NativeIdentityNamespace.REST_INSTRUMENT_CATALOG,
@@ -157,6 +161,10 @@ class ReferenceInstrument:
     @property
     def pair_symbol(self) -> str | None:
         return _optional_identity(self.reference, REST_PAIR)
+
+    @property
+    def rest_product_family(self) -> str | None:
+        return _optional_identity(self.reference, REST_PRODUCT_FAMILY)
 
     base_currency: None = None
     quote_currency: None = None

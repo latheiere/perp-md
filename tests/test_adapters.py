@@ -19,6 +19,7 @@ from perp_md import (
     InvalidInstrument,
     InvalidResponse,
     NativeUnit,
+    ObservationTimeKind,
     OpenInterestClient,
     ValuationMethod,
 )
@@ -26,12 +27,21 @@ from perp_md.adapters.ccxt import CcxtAdapter, resolve_ccxt_symbol
 from perp_md.adapters.native import (
     BinanceAdapter,
     BitfinexAdapter,
+    BtseAdapter,
     BybitAdapter,
+    DeepcoinAdapter,
     GateAdapter,
+    HtxAdapter,
     HyperliquidAdapter,
     KrakenAdapter,
+    KucoinAdapter,
+    LighterAdapter,
     MexcAdapter,
     OkxAdapter,
+    PhemexAdapter,
+    GrvtAdapter,
+    ToobitAdapter,
+    XtAdapter,
 )
 from perp_md.transport import HttpxTransport
 
@@ -55,6 +65,9 @@ HYPERLIQUID_CONTEXTS = json.loads(
 )
 KRAKEN_OPEN_INTEREST = json.loads(
     (Path(__file__).parent / "fixtures" / "kraken_open_interest.json").read_text()
+)
+ADDED_VENUES = json.loads(
+    (Path(__file__).parent / "fixtures" / "native_added_venues.json").read_text()
 )
 
 
@@ -340,6 +353,46 @@ def test_okx_preserves_reported_zero():
         )
     )
     assert result.current.value_usd == 0
+
+
+def test_okx_dated_contract_uses_futures_identity_and_bounded_history():
+    async def handler(method, url, params):
+        if url.endswith("open-interest-history"):
+            return {"code": "0", "data": FIXTURE["okx"]["history"]}
+        return {"data": FIXTURE["okx"]["data"]}
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        OkxAdapter(transport).fetch(
+            instrument("OKX", market_type="future"),
+            HistoryRange(300_000, 600_000),
+            include_history=True,
+        )
+    )
+
+    assert [point.value_usd for point in result.history] == [5, 12]
+    assert [float(point.base_quantity.amount) for point in result.history] == [2.5, 6]
+    assert transport.requests[0][2]["instType"] == "FUTURES"
+
+
+def test_bybit_inverse_open_interest_preserves_documented_quote_unit():
+    async def handler(method, url, params):
+        if url.endswith("open-interest"):
+            return {"retCode": 0, "result": {"list": [{"timestamp": "600000", "openInterest": "12"}]}}
+        return {"retCode": 0, "time": 700000, "result": {"list": [{"markPrice": "2", "openInterest": "18"}]}}
+
+    result = asyncio.run(
+        BybitAdapter(StubTransport(handler)).fetch(
+            instrument("BYBIT", contract_direction=ContractDirection.INVERSE),
+            HistoryRange(600_000, 600_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.native_unit is NativeUnit.QUOTE
+    assert result.current.base_quantity is None
+    assert result.current.value_usd == 18
+    assert result.history[0].native_unit is NativeUnit.QUOTE
 
 
 @pytest.mark.parametrize(
@@ -824,7 +877,8 @@ def test_aggregate_mixed_unit_ticker_requires_one_exact_instrument_match(ambiguo
         )
 
 
-def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
+@pytest.mark.parametrize("market_type", ["perpetual", "future"])
+def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps(market_type):
     analytics = KRAKEN_OPEN_INTEREST["analytics_pages"]
     marks = KRAKEN_OPEN_INTEREST["mark_pages"]
 
@@ -838,7 +892,12 @@ def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
     transport = StubTransport(handler)
     result = asyncio.run(
         KrakenAdapter(transport, lambda: 1_200.5).fetch(
-            instrument("KRAKEN", symbol="PF_LINEAR", contract_multiplier=None),
+            instrument(
+                "KRAKEN",
+                symbol="PF_LINEAR",
+                contract_multiplier=None,
+                market_type=market_type,
+            ),
             HistoryRange(300_000, 900_000),
             include_history=True,
         )
@@ -869,7 +928,8 @@ def test_base_unit_history_pages_forward_and_joins_exact_mark_timestamps():
     assert all(row["to"] == 900 for row in mark_requests)
 
 
-def test_contract_count_history_uses_multiplier_without_mark_requests():
+@pytest.mark.parametrize("market_type", ["perpetual", "future"])
+def test_contract_count_history_uses_multiplier_without_mark_requests(market_type):
     analytics = KRAKEN_OPEN_INTEREST["analytics_pages"]
 
     async def handler(method, url, params):
@@ -886,6 +946,7 @@ def test_contract_count_history_uses_multiplier_without_mark_requests():
                 settlement_currency="BASE",
                 contract_direction=ContractDirection.INVERSE,
                 contract_multiplier=100,
+                market_type=market_type,
             ),
             HistoryRange(300_000, 900_000),
             include_history=True,
@@ -1092,6 +1153,439 @@ def test_specialized_aggregate_endpoint_uses_supplied_secondary_identity():
     assert transport.requests[0][2] == {"keys": "EXACT-ENDPOINT-ID"}
 
 
+def test_derivative_status_history_uses_same_row_mark_and_exact_identity():
+    async def handler(method, url, params):
+        return (
+            ADDED_VENUES["bitfinex"]["history"]
+            if url.endswith("/hist")
+            else ADDED_VENUES["bitfinex"]["current"]
+        )
+
+    result = asyncio.run(
+        BitfinexAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "BITFINEX",
+                pair_symbol="tBASEF0:QUOTEF0",
+                contract_multiplier=0.01,
+            ),
+            HistoryRange(1_699_999_800_000, 1_700_000_100_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 20
+    assert result.history[0].timestamp_ms == 1_699_999_800_000
+    assert result.history[0].mark_price == 19
+    assert result.history[0].value_usd == pytest.approx(17.1)
+
+
+def test_dated_delivery_current_uses_the_exact_delivery_route_without_funding_or_history():
+    async def handler(method, url, params):
+        assert "/delivery/" in url
+        return FIXTURE["gate"]["details"]
+
+    result = asyncio.run(
+        GateAdapter(StubTransport(handler), lambda: 900.5).fetch(
+            instrument("GATE", market_type="future"),
+            HistoryRange(300_000, 900_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 10
+    assert result.history == ()
+
+
+def test_malformed_derivative_status_history_preserves_current_snapshot():
+    async def handler(method, url, params):
+        return (
+            ADDED_VENUES["bitfinex"]["malformed_history"]
+            if url.endswith("/hist")
+            else ADDED_VENUES["bitfinex"]["current"]
+        )
+
+    result = asyncio.run(
+        BitfinexAdapter(StubTransport(handler)).fetch(
+            instrument("BITFINEX", pair_symbol="tBASEF0:QUOTEF0"),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 2_000
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "expected"),
+    [
+        (DeepcoinAdapter, "DEEPCOIN", "BASE-QUOTE-SWAP", 20),
+        (KucoinAdapter, "KUCOIN", "BASEQUOTEM", 20),
+        (HtxAdapter, "HTX", "BASE-QUOTE", 30),
+    ],
+)
+def test_added_native_current_open_interest_preserves_proven_quantities(
+    adapter, venue, symbol, expected
+):
+    async def handler(method, url, params):
+        fixture = ADDED_VENUES[venue.lower()]
+        if venue == "DEEPCOIN":
+            return fixture["current_mark"] if url.endswith("mark-price") else fixture["current_oi"]
+        if venue == "KUCOIN" and url.endswith("open-interest"):
+            return fixture["current_oi"]
+        return fixture["current"]
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol, contract_multiplier=0.01),
+            None,
+            include_history=False,
+        )
+    )
+
+    assert result.current.value_usd == expected
+    assert result.current.base_quantity is not None
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol"),
+    [
+        (DeepcoinAdapter, "DEEPCOIN", "BASE-QUOTE-SWAP"),
+        (KucoinAdapter, "KUCOIN", "BASEQUOTEM"),
+    ],
+)
+def test_exact_mark_history_join_reports_missing_buckets_without_losing_current(
+    adapter, venue, symbol
+):
+    fixture = ADDED_VENUES[venue.lower()]
+
+    async def handler(method, url, params):
+        if venue == "DEEPCOIN":
+            if url.endswith("mark-price"):
+                return fixture["current_mark"]
+            if url.endswith("mark-price-candles"):
+                return fixture["history_marks_partial"]
+            if params.get("limit") == 1:
+                return fixture["current_oi"]
+            return fixture["history_oi"]
+        if url.endswith(f"contracts/{symbol}"):
+            return fixture["current"]
+        if url.endswith("open-interest"):
+            return fixture["history"] if params.get("interval") else fixture["current_oi"]
+        return {"code":"200000", "data":{"list":fixture["marks_partial"]["data"]}}
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol, contract_multiplier=0.01),
+            HistoryRange(1_699_999_800_000, 1_700_000_100_000),
+            include_history=True,
+        )
+    )
+
+    assert len(result.history) == 1
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_partial"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol"),
+    [
+        (DeepcoinAdapter, "DEEPCOIN", "BASE-QUOTE-SWAP"),
+        (KucoinAdapter, "KUCOIN", "BASEQUOTEM"),
+        (HtxAdapter, "HTX", "BASE-QUOTE"),
+    ],
+)
+def test_added_native_malformed_current_payload_is_rejected(adapter, venue, symbol):
+    async def handler(method, url, params):
+        return ADDED_VENUES[venue.lower()]["malformed"]
+
+    with pytest.raises((InvalidResponse, DataUnavailable)):
+        asyncio.run(
+            adapter(StubTransport(handler)).fetch(
+                instrument(venue, symbol=symbol), None, include_history=False
+            )
+        )
+
+
+def test_history_failure_preserves_valid_htx_current_snapshot():
+    async def handler(method, url, params):
+        return (
+            ADDED_VENUES["htx"]["history_missing"]
+            if url.endswith("swap_his_open_interest")
+            else ADDED_VENUES["htx"]["current"]
+        )
+
+    result = asyncio.run(
+        HtxAdapter(StubTransport(handler)).fetch(
+            instrument("HTX", symbol="BASE-QUOTE"), None, include_history=True
+        )
+    )
+
+    assert result.current.value_usd == 30
+    assert result.history == ()
+    assert result.history_issue is not None
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "fixture_key"),
+    [
+        (ToobitAdapter, "TOOBIT", "BASE-SWAP-QUOTE", "toobit"),
+        (PhemexAdapter, "PHEMEX", "BASEQUOTE", "phemex"),
+        (GrvtAdapter, "GRVT", "BASE_QUOTE_Perp", "grvt"),
+        (LighterAdapter, "LIGHTER", "7", "lighter"),
+    ],
+)
+def test_ranked_native_base_open_interest_uses_exact_identity_and_current_mark(
+    adapter, venue, symbol, fixture_key
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        if venue == "TOOBIT":
+            return fixture["current_mark"] if url.endswith("markPrice") else fixture["current_oi"]
+        if venue == "PHEMEX":
+            return fixture["linear"]
+        return fixture["current"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        adapter(transport, lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol), None, include_history=True
+        )
+    )
+
+    assert result.current.value_usd == 20
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.base_quantity is not None
+    assert result.history == ()
+    if venue in {"TOOBIT", "LIGHTER"}:
+        assert result.current.timestamp_kind is ObservationTimeKind.RETRIEVED
+
+
+def test_phemex_inverse_open_interest_preserves_contract_count_and_quote_value():
+    async def handler(method, url, params):
+        assert "/md/v1/" in url
+        return ADDED_VENUES["phemex"]["inverse"]
+
+    result = asyncio.run(
+        PhemexAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "PHEMEX",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=10,
+            ),
+            None,
+            include_history=False,
+        )
+    )
+
+    assert result.current.value_usd == 40
+    assert result.current.native_value == 4
+    assert result.current.native_unit is NativeUnit.CONTRACTS
+    assert result.current.mark_price is None
+
+
+def test_provider_reported_notional_preserves_source_time_without_inventing_quantity():
+    fixture = ADDED_VENUES["xt"]
+
+    async def handler(method, url, params):
+        assert "fapi.xt.com" in url
+        assert params == {"symbol": "BASE_QUOTE"}
+        return fixture["current"]
+
+    result = asyncio.run(
+        XtAdapter(StubTransport(handler)).fetch(
+            instrument("XT", symbol="BASE_QUOTE"), None, include_history=True
+        )
+    )
+
+    assert result.current.value_usd == 20
+    assert result.current.native_value is None
+    assert result.current.native_unit is None
+    assert result.current.timestamp_kind is ObservationTimeKind.SOURCE
+    assert result.history == ()
+
+
+def test_provider_reported_notional_rejects_mismatched_identity():
+    async def handler(method, url, params):
+        return ADDED_VENUES["xt"]["malformed"]
+
+    with pytest.raises(InvalidResponse):
+        asyncio.run(
+            XtAdapter(StubTransport(handler)).fetch(
+                instrument("XT", symbol="BASE_QUOTE"),
+                None,
+                include_history=False,
+            )
+        )
+
+
+def test_documentation_insufficient_open_interest_is_not_exposed_by_optional_runtime():
+    subject = instrument("WHITEBIT")
+    adapter = CcxtAdapter()
+
+    assert adapter.capabilities(subject).current is False
+    assert adapter.capabilities(subject).history is False
+    with pytest.raises(DataUnavailable, match="not supported"):
+        asyncio.run(adapter.fetch(subject, None, include_history=False))
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "fixture_key"),
+    [
+        (ToobitAdapter, "TOOBIT", "BASE-SWAP-QUOTE", "toobit"),
+        (PhemexAdapter, "PHEMEX", "BASEQUOTE", "phemex"),
+        (GrvtAdapter, "GRVT", "BASE_QUOTE_Perp", "grvt"),
+        (LighterAdapter, "LIGHTER", "7", "lighter"),
+    ],
+)
+def test_ranked_native_current_open_interest_rejects_malformed_payload(
+    adapter, venue, symbol, fixture_key
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        if venue == "TOOBIT" and url.endswith("markPrice"):
+            return fixture["current_mark"]
+        return fixture["malformed"]
+
+    with pytest.raises((InvalidResponse, DataUnavailable)):
+        asyncio.run(
+            adapter(StubTransport(handler)).fetch(
+                instrument(venue, symbol=symbol), None, include_history=False
+            )
+        )
+
+
+def test_grvt_rejects_non_futures_product_identity_before_request():
+    async def handler(method, url, params):
+        raise AssertionError("unsupported product must not be requested")
+
+    with pytest.raises(InvalidInstrument):
+        asyncio.run(
+            GrvtAdapter(StubTransport(handler)).fetch(
+                instrument("GRVT", market_type="option"),
+                None,
+                include_history=False,
+            )
+        )
+
+
+def test_btse_current_contract_count_joins_exact_mark_identity():
+    async def handler(method, url, params):
+        return (
+            ADDED_VENUES["btse"]["mark"]
+            if url.endswith("indices")
+            else ADDED_VENUES["btse"]["ticker"]
+        )
+
+    result = asyncio.run(
+        BtseAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "BTSE",
+                symbol="BASE-PERP-QUOTE",
+                contract_multiplier=0.01,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.native_value == 400
+    assert result.current.native_unit is NativeUnit.CONTRACTS
+    assert result.current.value_usd == 20
+    assert result.current.timestamp_kind is ObservationTimeKind.SOURCE
+    assert result.history == ()
+
+
+def test_kucoin_dated_inverse_contract_uses_current_and_bounded_history_protocols():
+    fixture = ADDED_VENUES["kucoin"]
+
+    async def handler(method, url, params):
+        if "/contracts/" in url:
+            return fixture["current"]
+        if url.endswith("open-interest"):
+            return fixture["history"] if params.get("interval") else fixture["current_oi"]
+        return {"code": "200000", "data": {"list": fixture["marks_partial"]["data"]}}
+
+    result = asyncio.run(
+        KucoinAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "KUCOIN",
+                symbol="BASEQUOTEM",
+                market_type="future",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=10,
+            ),
+            HistoryRange(1_699_999_800_000, 1_700_000_100_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 2_000
+    assert [point.value_usd for point in result.history] == [1_900, 2_000]
+    assert result.history_issue is None
+
+
+def test_htx_dated_linear_contract_preserves_reported_notional_and_history():
+    fixture = ADDED_VENUES["htx"]
+
+    async def handler(method, url, params):
+        assert params["business_type"] == "futures"
+        return (
+            fixture["dated_linear_history"]
+            if url.endswith("swap_his_open_interest")
+            else fixture["dated_linear_current"]
+        )
+
+    result = asyncio.run(
+        HtxAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "HTX",
+                symbol="BASE-QUOTE-260101",
+                market_type="future",
+                contract_multiplier=0.01,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 30
+    assert result.history[0].value_usd == 29
+    assert float(result.history[0].base_quantity.amount) == 2.9
+
+
+def test_htx_dated_inverse_contract_reuses_current_identity_for_hourly_history():
+    async def handler(method, url, params):
+        if url.endswith("contract_his_open_interest"):
+            assert params["symbol"] == "BASE"
+            assert params["contract_type"] == "quarter"
+            assert params["period"] == "60min"
+            return ADDED_VENUES["htx"]["dated_inverse_history"]
+        return ADDED_VENUES["htx"]["dated_inverse_current"]
+
+    result = asyncio.run(
+        HtxAdapter(StubTransport(handler)).fetch(
+            instrument(
+                "HTX",
+                symbol="BASE260101",
+                market_type="future",
+                contract_direction=ContractDirection.INVERSE,
+                contract_multiplier=10,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.value_usd == 3_000
+    assert result.history[0].value_usd == 2_900
+    assert result.history_issue is None
+
+
 def test_inverse_history_requires_explicit_pair_identity_without_rewriting_symbol():
     async def handler(method, url, params):
         if url.endswith("openInterest"):
@@ -1137,6 +1631,24 @@ def test_ccxt_hourly_history_capabilities_are_venue_supported():
     assert capabilities.history is True
     assert capabilities.history_interval_seconds == 3_600
     assert capabilities.max_history_days == 8
+
+
+def test_ranked_optional_metrics_use_exact_runtime_provider_ids():
+    adapter = CcxtAdapter()
+
+    assert {
+        venue: adapter.exchange_ids[venue]
+        for venue in (
+            "WEEX", "BINGX", "ASTER", "DIGIFINEX", "CRYPTOCOM", "BLOFIN"
+        )
+    } == {
+        "WEEX": "weex",
+        "BINGX": "bingx",
+        "ASTER": "aster",
+        "DIGIFINEX": "digifinex",
+        "CRYPTOCOM": "cryptocom",
+        "BLOFIN": "blofin",
+    }
 
 
 def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkeypatch):
