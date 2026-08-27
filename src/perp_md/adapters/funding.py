@@ -40,6 +40,11 @@ BYBIT_FUNDING_HISTORY_LIMIT = 200
 GATE_FUNDING_HISTORY_LIMIT = 1_000
 KRAKEN_FUNDING_HISTORY_MAX_ROWS = 50_000
 KRAKEN_FUNDING_INTERVAL_SECONDS = 3_600
+DEEPCOIN_FUNDING_HISTORY_LIMIT = 100
+HTX_FUNDING_HISTORY_LIMIT = 50
+TOOBIT_FUNDING_HISTORY_LIMIT = 1_000
+GRVT_FUNDING_HISTORY_LIMIT = 1_000
+LIGHTER_FUNDING_HISTORY_LIMIT = 500
 HYPERLIQUID_FUNDING_INTERVAL_SECONDS = 3_600
 HYPERLIQUID_FUNDING_INTERVAL_MS = HYPERLIQUID_FUNDING_INTERVAL_SECONDS * 1_000
 KRAKEN_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
@@ -594,6 +599,489 @@ class KrakenFundingAdapter(NativeFundingAdapter):
             return FundingResult(current, history_issue=self._issue(exc))
 
 
+class DeepcoinFundingAdapter(NativeFundingAdapter):
+    BASE_URL = "https://api.deepcoin.com/deepcoin/v2/market"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "DEEPCOIN"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.INDICATIVE,),
+            True,
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> FundingResult:
+        payload = await self.transport.get(
+            f"{self.BASE_URL}/funding-rate", {"instId": instrument.symbol}
+        )
+        rows = _deepcoin_rows(payload, "funding snapshot")
+        if len(rows) != 1:
+            raise DataUnavailable("instrument does not resolve to one funding row")
+        row = rows[0]
+        interval = _seconds_interval(row.get("settleInterval"))
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            None,
+            row.get("fundingRate"),
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            interval,
+            retrieved_at_ms=retrieved,
+            source_observation="funding.indicative_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            points = await self._history(instrument, history, retrieved)
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self,
+        instrument: Instrument,
+        requested: HistoryRange | None,
+        retrieved_at_ms: int,
+    ) -> tuple[FundingObservation, ...]:
+        observations: dict[int, FundingObservation] = {}
+        for page in range(1, FUNDING_HISTORY_MAX_PAGES + 1):
+            payload = await self.transport.get(
+                f"{self.BASE_URL}/fund-rate/history",
+                {
+                    "instId": instrument.symbol,
+                    "page": page,
+                    "limit": DEEPCOIN_FUNDING_HISTORY_LIMIT,
+                },
+            )
+            rows = _deepcoin_history_rows(payload)
+            for row in rows:
+                timestamp = _timestamp_ms(row.get("CreateTime"))
+                if requested is None or (
+                    (requested.start_ms is None or timestamp >= requested.start_ms)
+                    and (requested.end_ms is None or timestamp <= requested.end_ms)
+                ):
+                    observations[timestamp] = _relative_observation(
+                        timestamp,
+                        row.get("rate"),
+                        FundingRateKind.SETTLED,
+                        TemporalMode.HISTORICAL,
+                        retrieved_at_ms=retrieved_at_ms,
+                        source_observation="funding.settled_rate",
+                    )
+            if len(rows) < DEEPCOIN_FUNDING_HISTORY_LIMIT:
+                return preserve_observed_intervals(
+                    tuple(observations[key] for key in sorted(observations))
+                )
+        raise PaginationError("funding history exceeded the bounded page limit")
+
+
+class KucoinFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "KUCOIN"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.INDICATIVE,),
+            True,
+        )
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> FundingResult:
+        payload = await self.transport.get(
+            f"https://api-futures.kucoin.com/api/v1/funding-rate/{instrument.symbol}/current"
+        )
+        row = _kucoin_funding_data(payload, "funding snapshot", dict)
+        interval = _milliseconds_interval(row.get("granularity"))
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("timePoint")),
+            row.get("value"),
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            interval,
+            retrieved_at_ms=retrieved,
+            source_observation="funding.indicative_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            params: dict[str, Any] = {"symbol": instrument.symbol}
+            if history and history.start_ms is not None:
+                params["from"] = history.start_ms
+                params["to"] = history.end_ms or int(self.clock() * 1_000)
+            payload = await self.transport.get(
+                "https://api-futures.kucoin.com/api/v1/contract/funding-rates",
+                params,
+            )
+            rows = _kucoin_funding_data(payload, "funding history", list)
+            points = _relative_history(
+                rows,
+                "timepoint",
+                "fundingRate",
+                history,
+                retrieved_at_ms=retrieved,
+            )
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
+class HtxFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "HTX"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.NEXT,),
+            True,
+            required_metadata=("contract_direction",),
+        )
+
+    @staticmethod
+    def _prefix(instrument: Instrument) -> str:
+        if instrument.contract_direction is ContractDirection.LINEAR:
+            return "linear-swap-api/v1"
+        if instrument.contract_direction is ContractDirection.INVERSE:
+            return "swap-api/v1"
+        raise InvalidInstrument("contract_direction is required for provider product routing")
+
+    async def fetch(
+        self,
+        instrument: Instrument,
+        history: HistoryRange | None,
+        *,
+        include_history: bool,
+    ) -> FundingResult:
+        prefix = self._prefix(instrument)
+        payload = await self.transport.get(
+            f"https://api.hbdm.com/{prefix}/swap_funding_rate",
+            {"contract_code": instrument.symbol},
+        )
+        row = _htx_funding_row(payload, "funding snapshot")
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("funding_time")),
+            row.get("funding_rate"),
+            FundingRateKind.NEXT,
+            TemporalMode.NEXT,
+            retrieved_at_ms=retrieved,
+            source_observation="funding.next_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            rows: dict[int, FundingObservation] = {}
+            total_pages: int | None = None
+            for page in range(1, FUNDING_HISTORY_MAX_PAGES + 1):
+                payload = await self.transport.get(
+                    f"https://api.hbdm.com/{prefix}/swap_historical_funding_rate",
+                    {
+                        "contract_code": instrument.symbol,
+                        "page_index": page,
+                        "page_size": HTX_FUNDING_HISTORY_LIMIT,
+                    },
+                )
+                data = _htx_funding_history(payload)
+                total_pages = int(data.get("total_page", 0))
+                points = _relative_history(
+                    data["data"],
+                    "funding_time",
+                    "funding_rate",
+                    history,
+                    retrieved_at_ms=retrieved,
+                )
+                rows.update({point.timestamp_ms: point for point in points})
+                if page >= total_pages or len(data["data"]) < HTX_FUNDING_HISTORY_LIMIT:
+                    return FundingResult(
+                        current,
+                        preserve_observed_intervals(
+                            tuple(rows[key] for key in sorted(rows))
+                        ),
+                    )
+            raise PaginationError("funding history exceeded the bounded page limit")
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
+class ToobitFundingAdapter(NativeFundingAdapter):
+    BASE_URL = "https://api.toobit.com"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "TOOBIT"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(True, (FundingRateKind.NEXT,), True)
+
+    async def fetch(self, instrument, history, *, include_history):
+        payload = await self.transport.get(
+            f"{self.BASE_URL}/api/v1/futures/fundingRate",
+            {"symbol": instrument.symbol},
+        )
+        rows = _dict_rows(payload, "funding snapshot")
+        matches = [row for row in rows if row.get("symbol") == instrument.symbol]
+        if len(matches) != 1:
+            raise DataUnavailable("instrument does not resolve to one funding row")
+        row = matches[0]
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("nextFundingTime")),
+            row.get("rate"),
+            FundingRateKind.NEXT,
+            TemporalMode.NEXT,
+            _period_interval(row.get("period")),
+            retrieved_at_ms=retrieved,
+            source_observation="funding.next_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            normalized: dict[int, FundingObservation] = {}
+            end_id: int | None = None
+            for _ in range(FUNDING_HISTORY_MAX_PAGES):
+                params: dict[str, Any] = {
+                    "symbol": instrument.symbol,
+                    "limit": TOOBIT_FUNDING_HISTORY_LIMIT,
+                }
+                if end_id is not None:
+                    params["endId"] = end_id
+                payload = await self.transport.get(
+                    f"{self.BASE_URL}/api/v1/futures/historyFundingRate", params
+                )
+                rows = _dict_rows(payload, "funding history")
+                points = _relative_history(
+                    rows,
+                    "settleTime",
+                    "settleRate",
+                    history,
+                    retrieved_at_ms=retrieved,
+                )
+                normalized.update({point.timestamp_ms: point for point in points})
+                oldest_time = min((int(row["settleTime"]) for row in rows), default=None)
+                if (
+                    len(rows) < TOOBIT_FUNDING_HISTORY_LIMIT
+                    or oldest_time is None
+                    or (history and history.start_ms is not None and oldest_time <= history.start_ms)
+                ):
+                    return FundingResult(
+                        current,
+                        preserve_observed_intervals(
+                            tuple(normalized[key] for key in sorted(normalized))
+                        ),
+                    )
+                oldest_id = min(int(row["id"]) for row in rows)
+                advanced = oldest_id - 1
+                if end_id is not None and advanced >= end_id:
+                    raise PaginationError("funding history pagination did not advance")
+                end_id = advanced
+            raise PaginationError("funding history exceeded the bounded page limit")
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
+class LighterFundingAdapter(NativeFundingAdapter):
+    BASE_URL = "https://mainnet.zklighter.elliot.ai/api/v1"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "LIGHTER"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(True, (FundingRateKind.INDICATIVE,), True)
+
+    async def fetch(self, instrument, history, *, include_history):
+        payload = await self.transport.get(f"{self.BASE_URL}/funding-rates")
+        rows = payload.get("funding_rates") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        matches = [
+            row for row in rows
+            if isinstance(row, dict)
+            and str(row.get("market_id")) == instrument.symbol
+            and row.get("exchange") == "lighter"
+        ]
+        if len(matches) != 1:
+            raise DataUnavailable("instrument does not resolve to one funding row")
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            None,
+            matches[0].get("rate"),
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            _hour_interval(1),
+            retrieved_at_ms=retrieved,
+            source_observation="funding.indicative_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            end = history.end_ms if history and history.end_ms is not None else retrieved
+            start = history.start_ms if history and history.start_ms is not None else max(0, end - 7 * 86_400_000)
+            payload = await self.transport.get(
+                f"{self.BASE_URL}/fundings",
+                {
+                    "market_id": instrument.symbol,
+                    "resolution": "1h",
+                    "start_timestamp": start,
+                    "end_timestamp": end,
+                    "count_back": LIGHTER_FUNDING_HISTORY_LIMIT,
+                },
+            )
+            rows = payload.get("fundings") if isinstance(payload, dict) else None
+            points = _relative_history(
+                rows,
+                "timestamp",
+                "rate",
+                history,
+                timestamp_scale=1_000,
+                interval=_hour_interval(1),
+                retrieved_at_ms=retrieved,
+            )
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
+class GrvtFundingAdapter(NativeFundingAdapter):
+    BASE_URL = "https://market-data.grvt.io/full/v1"
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "GRVT"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(True, (FundingRateKind.INDICATIVE,), True)
+
+    async def fetch(self, instrument, history, *, include_history):
+        payload = await self.transport.post(
+            f"{self.BASE_URL}/ticker", {"instrument": instrument.symbol}
+        )
+        row = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(row, dict) or row.get("instrument") != instrument.symbol:
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        retrieved = int(self.clock() * 1_000)
+        interval = _hour_interval(row.get("funding_interval_hours"))
+        current = _relative_observation(
+            _nanoseconds_to_ms(row.get("event_time")),
+            _centibeeps_to_fraction(row.get("funding_rate")),
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            interval,
+            retrieved_at_ms=retrieved,
+            source_observation="funding.indicative_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            request: dict[str, Any] = {
+                "instrument": instrument.symbol,
+                "limit": GRVT_FUNDING_HISTORY_LIMIT,
+                "agg_type": "FUNDING_INTERVAL",
+            }
+            if history and history.start_ms is not None:
+                request["start_time"] = str(history.start_ms * 1_000_000)
+            if history and history.end_ms is not None:
+                request["end_time"] = str(history.end_ms * 1_000_000)
+            normalized: dict[int, FundingObservation] = {}
+            cursor: str | None = None
+            for _ in range(FUNDING_HISTORY_MAX_PAGES):
+                page_request = {**request, **({"cursor": cursor} if cursor else {})}
+                payload = await self.transport.post(f"{self.BASE_URL}/funding", page_request)
+                rows = payload.get("result") if isinstance(payload, dict) else None
+                if not isinstance(rows, list):
+                    raise InvalidResponse("provider returned an invalid funding history")
+                for source in rows:
+                    if not isinstance(source, dict) or source.get("instrument") != instrument.symbol:
+                        raise InvalidResponse("provider returned an invalid funding history row")
+                    timestamp = _nanoseconds_to_ms(source.get("funding_time"))
+                    if history and history.start_ms is not None and timestamp < history.start_ms:
+                        continue
+                    if history and history.end_ms is not None and timestamp > history.end_ms:
+                        continue
+                    normalized[timestamp] = _relative_observation(
+                        timestamp,
+                        _centibeeps_to_fraction(source.get("funding_rate")),
+                        FundingRateKind.SETTLED,
+                        TemporalMode.HISTORICAL,
+                        _hour_interval(source.get("funding_interval_hours")),
+                        retrieved_at_ms=retrieved,
+                        source_observation="funding.settled_rate",
+                    )
+                next_cursor = payload.get("next")
+                if not next_cursor:
+                    return FundingResult(current, preserve_observed_intervals(tuple(normalized[key] for key in sorted(normalized))))
+                if not isinstance(next_cursor, str) or next_cursor == cursor:
+                    raise PaginationError("funding history pagination did not advance")
+                cursor = next_cursor
+            raise PaginationError("funding history exceeded the bounded page limit")
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
+class BtseFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "BTSE" and instrument.market_type != "future"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(True, (FundingRateKind.NEXT,), True)
+
+    async def fetch(self, instrument, history, *, include_history):
+        payload = await self.transport.get(
+            "https://api.btse.com/futures/api/v2.1/market_summary",
+            {"symbol": instrument.symbol, "useNewSymbolNaming": "true", "listFullAttributes": "true"},
+        )
+        rows = payload if isinstance(payload, list) else payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        matches = [row for row in rows if isinstance(row, dict) and row.get("symbol") == instrument.symbol]
+        if len(matches) != 1:
+            raise DataUnavailable("instrument does not resolve to one funding row")
+        row = matches[0]
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("fundingTime")),
+            row.get("fundingRate"),
+            FundingRateKind.NEXT,
+            TemporalMode.NEXT,
+            _minutes_interval(row.get("fundingIntervalMinutes")),
+            retrieved_at_ms=retrieved,
+            source_observation="funding.next_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            params: dict[str, Any] = {"symbol": instrument.symbol, "count": 500}
+            if history and history.start_ms is not None:
+                params["from"] = history.start_ms
+            if history and history.end_ms is not None:
+                params["to"] = history.end_ms
+            payload = await self.transport.get(
+                "https://api.btse.com/futures/api/v2.1/funding_history", params
+            )
+            rows = payload.get(instrument.symbol) if isinstance(payload, dict) else None
+            if rows is None and isinstance(payload, list):
+                rows = payload
+            points = _relative_history(
+                rows, "time", "rate", history, timestamp_scale=1_000,
+                retrieved_at_ms=retrieved,
+            )
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+
 def native_funding_adapters(
     transport: JsonTransport,
 ) -> dict[str, NativeFundingAdapter]:
@@ -604,6 +1092,13 @@ def native_funding_adapters(
         OkxFundingAdapter(transport),
         HyperliquidFundingAdapter(transport),
         KrakenFundingAdapter(transport),
+        DeepcoinFundingAdapter(transport),
+        KucoinFundingAdapter(transport),
+        HtxFundingAdapter(transport),
+        ToobitFundingAdapter(transport),
+        LighterFundingAdapter(transport),
+        GrvtFundingAdapter(transport),
+        BtseFundingAdapter(transport),
     ]
     return {
         venue: adapter
@@ -615,6 +1110,13 @@ def native_funding_adapters(
             OkxFundingAdapter: ("OKX",),
             HyperliquidFundingAdapter: ("HYPERLIQUID",),
             KrakenFundingAdapter: ("KRAKEN",),
+            DeepcoinFundingAdapter: ("DEEPCOIN",),
+            KucoinFundingAdapter: ("KUCOIN",),
+            HtxFundingAdapter: ("HTX",),
+            ToobitFundingAdapter: ("TOOBIT",),
+            LighterFundingAdapter: ("LIGHTER",),
+            GrvtFundingAdapter: ("GRVT",),
+            BtseFundingAdapter: ("BTSE",),
         }[type(adapter)]
     }
 
@@ -779,6 +1281,97 @@ def _hour_interval(value: Any) -> FundingIntervalV1:
     if not duration.is_integer() or duration <= 0:
         raise InvalidResponse("provider returned an invalid funding interval")
     return explicit_interval(int(duration))
+
+
+def _milliseconds_interval(value: Any) -> FundingIntervalV1:
+    milliseconds = number(value)
+    if milliseconds <= 0 or not milliseconds.is_integer() or int(milliseconds) % 1_000:
+        raise InvalidResponse("provider returned an invalid funding interval")
+    return explicit_interval(int(milliseconds) // 1_000)
+
+
+def _minutes_interval(value: Any) -> FundingIntervalV1:
+    if value in (None, "", 0, "0"):
+        return unspecified_interval()
+    minutes = number(value)
+    duration = minutes * 60
+    if not duration.is_integer() or duration <= 0:
+        raise InvalidResponse("provider returned an invalid funding interval")
+    return explicit_interval(int(duration))
+
+
+def _period_interval(value: Any) -> FundingIntervalV1:
+    if not isinstance(value, str) or len(value) < 2 or value[-1].upper() != "H":
+        return unspecified_interval()
+    return _hour_interval(value[:-1])
+
+
+def _nanoseconds_to_ms(value: Any) -> int:
+    timestamp = _integer_timestamp_ms(value)
+    if timestamp % 1_000_000:
+        raise InvalidResponse("provider returned a non-millisecond source timestamp")
+    return timestamp // 1_000_000
+
+
+def _centibeeps_to_fraction(value: Any) -> float:
+    return number(value) / 1_000_000
+
+
+def _dict_rows(payload: Any, description: str) -> list[dict[str, Any]]:
+    if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload
+
+
+def _deepcoin_rows(payload: Any, description: str) -> list[dict[str, Any]]:
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("code")) != "0"
+        or not isinstance(payload.get("data"), list)
+        or any(not isinstance(row, dict) for row in payload["data"])
+    ):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload["data"]
+
+
+def _deepcoin_history_rows(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        raise InvalidResponse("provider rejected the funding history request")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+        raise InvalidResponse("provider returned an invalid funding history")
+    if any(not isinstance(row, dict) for row in data["list"]):
+        raise InvalidResponse("provider returned an invalid funding history row")
+    return data["list"]
+
+
+def _kucoin_funding_data(payload: Any, description: str, expected: type) -> Any:
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("code")) != "200000"
+        or not isinstance(payload.get("data"), expected)
+    ):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload["data"]
+
+
+def _htx_funding_row(payload: Any, description: str) -> dict[str, Any]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != "ok"
+        or not isinstance(payload.get("data"), dict)
+    ):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload["data"]
+
+
+def _htx_funding_history(payload: Any) -> dict[str, Any]:
+    data = _htx_funding_row(payload, "funding history")
+    if not isinstance(data.get("data"), list) or any(
+        not isinstance(row, dict) for row in data["data"]
+    ):
+        raise InvalidResponse("provider returned an invalid funding history row")
+    return data
 
 
 def _kraken_current(payload: Any, symbol: str) -> tuple[dict[str, Any], int]:

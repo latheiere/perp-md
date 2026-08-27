@@ -36,6 +36,11 @@ class ValuationMethod(StrEnum):
     CURRENT_MARK = "current_mark"
 
 
+class ObservationTimeKind(StrEnum):
+    SOURCE = "source"
+    RETRIEVED = "retrieved"
+
+
 @dataclass(frozen=True, slots=True)
 class Instrument:
     venue: str
@@ -101,6 +106,7 @@ class OpenInterestObservation:
     mark_price: float | None = None
     valuation: ValuationMethod = ValuationMethod.VENUE_REPORTED
     base_quantity: OpenInterestValueV1 | None = None
+    timestamp_kind: ObservationTimeKind = ObservationTimeKind.SOURCE
 
     def __post_init__(self) -> None:
         value = float(self.value_usd)
@@ -125,6 +131,8 @@ class OpenInterestObservation:
             raise InvalidResponse(
                 "base quantity must use the CDM open-interest contract"
             )
+        if not isinstance(self.timestamp_kind, ObservationTimeKind):
+            raise InvalidResponse("open-interest timestamp kind is invalid")
 
     @property
     def notional(self) -> OpenInterestValueV1:

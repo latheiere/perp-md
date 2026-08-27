@@ -21,14 +21,24 @@ from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.adapters.funding import (
     BinanceFundingAdapter,
     BybitFundingAdapter,
+    DeepcoinFundingAdapter,
     GateFundingAdapter,
+    HtxFundingAdapter,
     HyperliquidFundingAdapter,
+    BtseFundingAdapter,
+    GrvtFundingAdapter,
     KrakenFundingAdapter,
+    KucoinFundingAdapter,
+    LighterFundingAdapter,
     OkxFundingAdapter,
+    ToobitFundingAdapter,
 )
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "native_funding.json").read_text()
+)
+ADDED_VENUES = json.loads(
+    (Path(__file__).parent / "fixtures" / "native_added_venues.json").read_text()
 )
 
 
@@ -60,6 +70,64 @@ def instrument(venue: str, **values: Any) -> Instrument:
         "contract_multiplier": 1,
     }
     return Instrument(**{**defaults, **values})
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "fixture_key"),
+    [
+        (ToobitFundingAdapter, "TOOBIT", "BASE-SWAP-QUOTE", "toobit"),
+        (LighterFundingAdapter, "LIGHTER", "7", "lighter"),
+        (GrvtFundingAdapter, "GRVT", "BASE_QUOTE_Perp", "grvt"),
+        (BtseFundingAdapter, "BTSE", "BASE-PERP-QUOTE", "btse"),
+    ],
+)
+def test_ranked_native_funding_preserves_current_and_settled_protocol_semantics(
+    adapter, venue, symbol, fixture_key
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        return fixture["funding_history"] if "history" in url or url.endswith("/funding") or url.endswith("/fundings") else fixture["funding_current" if "funding_current" in fixture else "current"]
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol), None, include_history=True
+        )
+    )
+
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.history[0].rate == pytest.approx(0.00008)
+    assert result.history[0].kind is FundingRateKind.SETTLED
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "fixture_key"),
+    [
+        (ToobitFundingAdapter, "TOOBIT", "BASE-SWAP-QUOTE", "toobit"),
+        (LighterFundingAdapter, "LIGHTER", "7", "lighter"),
+        (GrvtFundingAdapter, "GRVT", "BASE_QUOTE_Perp", "grvt"),
+        (BtseFundingAdapter, "BTSE", "BASE-PERP-QUOTE", "btse"),
+    ],
+)
+def test_ranked_native_funding_keeps_valid_current_when_history_is_malformed(
+    adapter, venue, symbol, fixture_key
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        if "history" in url or url.endswith("/funding") or url.endswith("/fundings"):
+            return {"unexpected": []}
+        return fixture["funding_current" if "funding_current" in fixture else "current"]
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol), None, include_history=True
+        )
+    )
+
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.history == ()
+    assert result.history_issue is not None
 
 
 def test_relative_current_and_settled_history_preserve_temporal_semantics():
@@ -580,3 +648,80 @@ def test_funding_client_is_independent_from_open_interest_client():
 
     assert result.current.rate == pytest.approx(0.0001)
     assert adapter.closed is True
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "current_kind"),
+    [
+        (DeepcoinFundingAdapter, "DEEPCOIN", "BASE-QUOTE-SWAP", FundingRateKind.INDICATIVE),
+        (KucoinFundingAdapter, "KUCOIN", "BASEQUOTEM", FundingRateKind.INDICATIVE),
+        (HtxFundingAdapter, "HTX", "BASE-QUOTE", FundingRateKind.NEXT),
+    ],
+)
+def test_added_native_funding_preserves_current_and_settled_history(
+    adapter, venue, symbol, current_kind
+):
+    fixture = ADDED_VENUES[venue.lower()]
+
+    async def handler(method, url, params):
+        is_history = (
+            "histor" in url
+            or "fund-rate/history" in url
+            or "contract/funding-rates" in url
+        )
+        return fixture["funding_history"] if is_history else fixture["funding_current"]
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol),
+            HistoryRange(1_699_000_000_000, 1_700_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.kind is current_kind
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.history[0].kind is FundingRateKind.SETTLED
+    assert result.history[0].rate == pytest.approx(0.00008)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol"),
+    [
+        (DeepcoinFundingAdapter, "DEEPCOIN", "BASE-QUOTE-SWAP"),
+        (KucoinFundingAdapter, "KUCOIN", "BASEQUOTEM"),
+        (HtxFundingAdapter, "HTX", "BASE-QUOTE"),
+    ],
+)
+def test_added_native_malformed_funding_is_rejected(adapter, venue, symbol):
+    async def handler(method, url, params):
+        return ADDED_VENUES[venue.lower()]["malformed"]
+
+    with pytest.raises((InvalidResponse, TypeError)):
+        asyncio.run(
+            adapter(StubTransport(handler)).fetch(
+                instrument(venue, symbol=symbol), None, include_history=False
+            )
+        )
+
+
+def test_malformed_native_funding_history_preserves_current_snapshot():
+    async def handler(method, url, params):
+        return (
+            ADDED_VENUES["deepcoin"]["malformed"]
+            if url.endswith("fund-rate/history")
+            else ADDED_VENUES["deepcoin"]["funding_current"]
+        )
+
+    result = asyncio.run(
+        DeepcoinFundingAdapter(StubTransport(handler)).fetch(
+            instrument("DEEPCOIN", symbol="BASE-QUOTE-SWAP"),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"

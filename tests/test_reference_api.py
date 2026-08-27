@@ -10,6 +10,7 @@ from cdm import (
     ContractValueDescriptorV1,
     ContractValueUnit,
     DataPointKind,
+    FundingRateKind,
     InstrumentDescriptorV1,
     InstrumentKind,
     InstrumentReferenceV1,
@@ -36,9 +37,11 @@ from perp_md.adapters.ccxt import CcxtAdapter
 from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.capabilities import (
     CCXT_FUNDING_FEATURE,
+    CCXT_FUNDING_HISTORY_FEATURE,
     CCXT_OPEN_INTEREST_FEATURE,
     CCXT_OPEN_INTEREST_HISTORY_FEATURE,
 )
+from perp_md.models import FundingCapabilities
 
 
 class StubTransport:
@@ -62,10 +65,11 @@ def reference(
     direction: str = "linear",
     *identities: NativeIdentityV1,
     amount: str = "1",
+    kind: InstrumentKind = InstrumentKind.PERPETUAL_SWAP,
 ) -> InstrumentReferenceV1:
     return InstrumentReferenceV1(
         InstrumentDescriptorV1(
-            instrument_kind=InstrumentKind.PERPETUAL_SWAP,
+            instrument_kind=kind,
             contract_value=ContractValueDescriptorV1(
                 amount=Decimal(amount),
                 unit=(
@@ -289,6 +293,74 @@ def test_reference_history_passes_the_exact_pair_identity_without_rewriting():
     assert result.history == ()
 
 
+def test_dated_inverse_history_passes_exact_pair_and_contract_type_identities():
+    async def handler(method, url, params):
+        if url.endswith("openInterestHist"):
+            assert params["pair"] == "EXACT-PAIR-ID"
+            assert params["contractType"] == "NEXT_QUARTER"
+            return [
+                {
+                    "timestamp": 1_699_999_800_000,
+                    "sumOpenInterest": "2",
+                }
+            ]
+        if url.endswith("openInterest"):
+            return {"openInterest": "1", "time": 1_700_000_000_000}
+        return {"markPrice": "2"}
+
+    subject = reference(
+        "inverse",
+        native_identity(
+            NativeIdentityRole.INSTRUMENT,
+            NativeIdentityNamespace.REST,
+            "EXACT-CONTRACT-ID",
+        ),
+        native_identity(
+            NativeIdentityRole.PAIR,
+            NativeIdentityNamespace.REST,
+            "EXACT-PAIR-ID",
+        ),
+        native_identity(
+            NativeIdentityRole.PRODUCT_FAMILY,
+            NativeIdentityNamespace.REST,
+            "NEXT_QUARTER",
+        ),
+        amount="10",
+        kind=InstrumentKind.FUTURE,
+    )
+    client = OpenInterestClient(transport=StubTransport(handler))
+
+    result = asyncio.run(client.fetch_reference("BINANCE", subject))
+
+    assert result.current.value_usd == 10
+    assert result.history[0].value_usd == 20
+
+
+def test_dated_inverse_history_requires_explicit_rest_contract_category():
+    subject = reference(
+        "inverse",
+        native_identity(
+            NativeIdentityRole.INSTRUMENT,
+            NativeIdentityNamespace.REST,
+            "EXACT-CONTRACT-ID",
+        ),
+        native_identity(
+            NativeIdentityRole.PAIR,
+            NativeIdentityNamespace.REST,
+            "EXACT-PAIR-ID",
+        ),
+        amount="10",
+        kind=InstrumentKind.FUTURE,
+    )
+    client = OpenInterestClient(transport=StubTransport())
+
+    with pytest.raises(CapabilityUnavailable) as raised:
+        asyncio.run(client.fetch_reference("BINANCE", subject))
+
+    assert raised.value.assessment.status is CapabilityStatus.METADATA_INCOMPLETE
+    assert raised.value.assessment.issues[0].code == "missing_native_identity"
+
+
 def test_scoped_aggregate_uses_separate_exact_route_and_instrument_identities():
     async def handler(method, url, payload):
         assert payload == {"type": "metaAndAssetCtxs", "dex": "EXACT-SCOPE-ID"}
@@ -480,13 +552,13 @@ def test_optional_runtime_plan_returns_generic_constraints_without_feature_ids()
         ),
     )
     client = OpenInterestClient(
-        adapters={"HTX": Adapter()},
+        adapters={"WEEX": Adapter()},
         transport=StubTransport(),
     )
 
     plan = asyncio.run(
         client.plan_reference(
-            "HTX",
+            "WEEX",
             subject,
             datapoint=DataPointKind.OPEN_INTEREST_NOTIONAL,
             temporal_mode=TemporalMode.HISTORICAL,
@@ -498,6 +570,54 @@ def test_optional_runtime_plan_returns_generic_constraints_without_feature_ids()
     assert plan.retrieval.pagination is PaginationMode.RUNTIME_DEFINED
     assert plan.retrieval.fixed_interval_seconds == 3_600
     assert plan.retrieval.max_lookback_seconds == 8 * 86_400
+    assert "ccxt.fetch" not in repr(plan)
+
+
+def test_hybrid_product_mapping_selects_optional_historical_funding_runtime():
+    class Adapter:
+        def supports(self, subject):
+            return True
+
+        def capabilities(self, subject):
+            return FundingCapabilities(
+                True,
+                (FundingRateKind.INDICATIVE,),
+                True,
+            )
+
+        async def runtime_features(self, subject):
+            return frozenset(
+                {CCXT_FUNDING_FEATURE, CCXT_FUNDING_HISTORY_FEATURE}
+            )
+
+        async def close(self):
+            return None
+
+    subject = reference(
+        "linear",
+        native_identity(
+            NativeIdentityRole.INSTRUMENT,
+            NativeIdentityNamespace.REST,
+            "EXACT-NATIVE-ID",
+        ),
+    )
+    client = FundingClient(
+        adapters={"XT": Adapter()},
+        transport=StubTransport(),
+    )
+
+    plan = asyncio.run(
+        client.plan_reference(
+            "XT",
+            subject,
+            datapoint=DataPointKind.FUNDING_SETTLED_RATE,
+            temporal_mode=TemporalMode.HISTORICAL,
+        )
+    )
+
+    assert plan.status is CapabilityStatus.SUPPORTED
+    assert plan.retrieval is not None
+    assert plan.retrieval.pagination is PaginationMode.RUNTIME_DEFINED
     assert "ccxt.fetch" not in repr(plan)
 
 

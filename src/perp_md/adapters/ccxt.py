@@ -30,6 +30,7 @@ from perp_md.models import (
     HistoryRange,
     Instrument,
     NativeUnit,
+    ObservationTimeKind,
     OpenInterestCapabilities,
     OpenInterestObservation,
     OpenInterestResult,
@@ -43,15 +44,21 @@ from perp_md.normalization import (
 )
 
 DEFAULT_EXCHANGE_IDS = {
+    "ASTER": "aster",
     "BITFINEX": "bitfinex",
     "BITGET": "bitget",
     "BITMART": "bitmart",
+    "BINGX": "bingx",
+    "BLOFIN": "blofin",
     "COINBASE": "coinbaseinternational",
     "DERIBIT": "deribit",
+    "DIGIFINEX": "digifinex",
     "HTX": "htx",
     "KUCOIN": "kucoin",
     "MEXC": "mexc",
+    "CRYPTOCOM": "cryptocom",
     "WHITEBIT": "whitebit",
+    "WEEX": "weex",
     "XT": "xt",
 }
 
@@ -73,9 +80,11 @@ class CcxtAdapter:
         return instrument.venue in self.exchange_ids
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
+        if instrument.venue == "WHITEBIT":
+            return OpenInterestCapabilities(False, False)
         required = (
             ("contract_direction", "contract_multiplier")
-            if instrument.venue in {"BITFINEX", "BITGET", "COINBASE", "WHITEBIT"}
+            if instrument.venue in {"BITFINEX", "BITGET", "COINBASE"}
             else ()
         )
         if instrument.venue == "HTX":
@@ -108,9 +117,6 @@ class CcxtAdapter:
             if (
                 instrument.venue == "COINBASE"
                 and callable(getattr(exchange, "v1_public_get_instruments", None))
-            ) or (
-                instrument.venue == "WHITEBIT"
-                and callable(getattr(exchange, "v4_public_get_futures", None))
             ):
                 features.add(CCXT_SPECIALIZED_OPEN_INTEREST_FEATURE)
             return frozenset(features)
@@ -128,8 +134,8 @@ class CcxtAdapter:
         try:
             if instrument.venue == "COINBASE":
                 return await self._coinbase(instrument)
-            if instrument.venue == "WHITEBIT":
-                return await self._whitebit(instrument)
+            if not self.capabilities(instrument).current:
+                raise DataUnavailable("open interest is not supported for this venue")
             exchange, symbol = await self._market(instrument)
             if not exchange.has.get("fetchOpenInterest"):
                 raise DataUnavailable("open interest is not available for this venue")
@@ -161,6 +167,9 @@ class CcxtAdapter:
                 )
                 if native is not None
                 else None,
+                ObservationTimeKind.SOURCE
+                if payload.get("timestamp") is not None
+                else ObservationTimeKind.RETRIEVED,
             )
             if not include_history:
                 return OpenInterestResult(current)
@@ -269,48 +278,6 @@ class CcxtAdapter:
         return OpenInterestResult(
             OpenInterestObservation(
                 self._iso_ms(quote.get("timestamp")),
-                contract_value_usd(instrument, native, mark),
-                native,
-                NativeUnit.CONTRACTS,
-                mark,
-                ValuationMethod.MARK_PRICE,
-                proven_base_quantity(instrument, native, NativeUnit.CONTRACTS),
-            )
-        )
-
-    async def _whitebit(self, instrument: Instrument) -> OpenInterestResult:
-        exchange, owned = self._runtime_exchange(instrument)
-        try:
-            payload = await exchange.v4_public_get_futures()
-        finally:
-            if owned:
-                await exchange.close()
-        if (
-            not isinstance(payload, dict)
-            or not payload.get("success")
-            or not isinstance(payload.get("result"), list)
-        ):
-            raise InvalidResponse("venue returned an invalid futures catalog")
-        target = adapter_identity(
-            instrument,
-            REST_INSTRUMENT_CATALOG_INSTRUMENT,
-            legacy_value=instrument.symbol
-            if isinstance(instrument, Instrument)
-            else None,
-        )
-        rows = [row for row in payload["result"] if row.get("ticker_id") == target]
-        if len(rows) != 1:
-            raise DataUnavailable(
-                "instrument is missing or ambiguous in the venue catalog"
-            )
-        row = rows[0]
-        mark_raw = row.get("index_price") or row.get("last_price")
-        if row.get("open_interest") is None or mark_raw is None:
-            raise DataUnavailable("venue omitted open interest or reference price")
-        native, mark = number(row["open_interest"]), number(mark_raw)
-        return OpenInterestResult(
-            OpenInterestObservation(
-                int(time.time() * 1000),
                 contract_value_usd(instrument, native, mark),
                 native,
                 NativeUnit.CONTRACTS,

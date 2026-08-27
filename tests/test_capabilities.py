@@ -41,6 +41,10 @@ from perp_md import (
     instrument_descriptor_from_instrument,
     load_coverage_schema,
 )
+from perp_md.capabilities import (
+    CCXT_FUNDING_FEATURE,
+    CCXT_FUNDING_HISTORY_FEATURE,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -191,7 +195,7 @@ def test_specialized_endpoint_identity_is_declared_separately(
     assert complete.status is CapabilityStatus.SUPPORTED
 
 
-def test_base_quantity_and_notional_have_independent_metadata_requirements():
+def test_provider_reported_base_quantity_and_notional_need_no_contract_metadata():
     neutral = descriptor("linear")
     notional = assess_capability(
         "BYBIT",
@@ -209,8 +213,7 @@ def test_base_quantity_and_notional_have_independent_metadata_requirements():
     )
 
     assert notional.status is CapabilityStatus.SUPPORTED
-    assert base.status is CapabilityStatus.METADATA_INCOMPLETE
-    assert base.missing_fields == ("$.contract_value.amount",)
+    assert base.status is CapabilityStatus.SUPPORTED
 
 
 def test_exact_datapoint_definition_does_not_match_another_denomination():
@@ -291,6 +294,82 @@ def test_current_funding_interval_capability_tracks_source_evidence(
     assert assessment.status is CapabilityStatus.SUPPORTED
 
 
+def test_documentation_insufficient_open_interest_is_absent_while_funding_remains_declared():
+    mappings = [
+        mapping
+        for mapping in coverage_manifest()["mappings"]
+        if mapping["venue_id"] == "WHITEBIT"
+    ]
+    kinds = {
+        capability["datapoint"]["kind"]
+        for mapping in mappings
+        for capability in mapping["capabilities"]
+    }
+
+    assert not any(kind.startswith("open_interest.") for kind in kinds)
+    assert "funding.indicative_rate" in kinds
+    assert "funding.settled_rate" in kinds
+
+
+def test_native_notional_and_optional_funding_share_one_exact_product_mapping():
+    mapping = next(
+        mapping
+        for mapping in coverage_manifest()["mappings"]
+        if mapping["mapping_id"] == "xt.perpetual.linear.perpetual.v1"
+    )
+    capabilities = mapping["capabilities"]
+
+    assert mapping["adapter_id"] == "native.xt"
+    assert {item["datapoint"]["kind"] for item in capabilities} == {
+        "open_interest.notional",
+        "funding.indicative_rate",
+        "funding.settled_rate",
+    }
+    oi = next(
+        item
+        for item in capabilities
+        if item["datapoint"]["kind"] == "open_interest.notional"
+    )
+    assert oi["datapoint"]["temporal_mode"] == "current"
+
+    subject = descriptor("linear")
+    native_oi = assess_capability(
+        "XT",
+        DataPointKind.OPEN_INTEREST_NOTIONAL,
+        subject,
+        native_identities=identity(),
+        temporal_mode=TemporalMode.CURRENT,
+    )
+    funding_without_runtime = assess_capability(
+        "XT",
+        DataPointKind.FUNDING_INDICATIVE_RATE,
+        subject,
+        native_identities=identity(),
+        temporal_mode=TemporalMode.CURRENT,
+    )
+    current_funding = assess_capability(
+        "XT",
+        DataPointKind.FUNDING_INDICATIVE_RATE,
+        subject,
+        native_identities=identity(),
+        temporal_mode=TemporalMode.CURRENT,
+        runtime_features=(CCXT_FUNDING_FEATURE,),
+    )
+    historical_funding = assess_capability(
+        "XT",
+        DataPointKind.FUNDING_SETTLED_RATE,
+        subject,
+        native_identities=identity(),
+        temporal_mode=TemporalMode.HISTORICAL,
+        runtime_features=(CCXT_FUNDING_HISTORY_FEATURE,),
+    )
+
+    assert native_oi.status is CapabilityStatus.SUPPORTED
+    assert funding_without_runtime.status is CapabilityStatus.RUNTIME_UNAVAILABLE
+    assert current_funding.status is CapabilityStatus.SUPPORTED
+    assert historical_funding.status is CapabilityStatus.SUPPORTED
+
+
 def test_legacy_instrument_projection_is_a_compatibility_seam_into_cdm():
     projected = instrument_descriptor_from_instrument(
         Instrument(
@@ -318,7 +397,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.2.6"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.3.0"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )
@@ -382,7 +461,18 @@ def test_exact_contextual_native_evidence_produces_mutual_unique_catalog_joins()
     assert expected_exact_mappings == declared_exact_mappings
 
     for group in catalog_groups:
-        scenario = to_data(instrument_scenario(descriptor(group["direction"])))
+        scenario = to_data(
+            instrument_scenario(
+                descriptor(
+                    group["direction"],
+                    kind=(
+                        InstrumentKind.FUTURE
+                        if group.get("kind") == "future"
+                        else InstrumentKind.PERPETUAL_SWAP
+                    ),
+                )
+            )
+        )
         catalog_evidence = {
             (item["name"].strip().casefold(), item["context"].strip().casefold())
             for item in group["names"]
