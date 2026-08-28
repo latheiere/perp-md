@@ -97,6 +97,12 @@ adapter continues through a short response when source timestamps show that
 the requested range has not yet been traversed; sparse native buckets do not
 silently truncate later available history.
 
+For the rate-bounded native funding-history endpoint, the adapter serializes
+concurrent page requests and starts each request only after 200 milliseconds
+following the preceding request's completion. This route-local pacing boundary
+does not apply to current acquisition or other endpoints, and does not alter
+successful page contents, range filtering, or ordered timestamp deduplication.
+
 When a five-minute analytics protocol publishes OI as four-value OHLC tuples,
 the adapter validates the complete tuple and uses its close. Linear-contract
 history is joined to mark-price candles only on exact source timestamps. A

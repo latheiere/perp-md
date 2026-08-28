@@ -60,6 +60,20 @@ class StubTransport:
         return None
 
 
+class FakePacerTime:
+    def __init__(self) -> None:
+        self.current = 0.0
+        self.sleep_durations: list[float] = []
+
+    def clock(self) -> float:
+        return self.current
+
+    async def sleep(self, duration: float) -> None:
+        self.sleep_durations.append(duration)
+        self.current += duration
+        await asyncio.sleep(0)
+
+
 def instrument(venue: str, **values: Any) -> Instrument:
     defaults = {
         "venue": venue,
@@ -871,3 +885,123 @@ def test_flat_successful_native_funding_envelope_is_accepted():
 
     assert [point.sample.rate for point in result.history] == [Decimal("0.00008")]
     assert result.history_issue is None
+
+
+def test_concurrent_funding_history_requests_do_not_overlap_or_bunch():
+    fake_time = FakePacerTime()
+    current_starts: list[float] = []
+    history_starts: list[float] = []
+    history_completions: list[float] = []
+    active_history_requests = 0
+    maximum_active_history_requests = 0
+
+    async def handler(method, url, params):
+        nonlocal active_history_requests, maximum_active_history_requests
+        if url.endswith("fund-rate/history"):
+            history_starts.append(fake_time.clock())
+            active_history_requests += 1
+            maximum_active_history_requests = max(
+                maximum_active_history_requests, active_history_requests
+            )
+            await asyncio.sleep(0)
+            fake_time.current += 0.05
+            history_completions.append(fake_time.clock())
+            active_history_requests -= 1
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "rate": "0.00008",
+                        "CreateTime": 1_699_971_200,
+                    }
+                ],
+            }
+        current_starts.append(fake_time.clock())
+        return ADDED_VENUES["deepcoin"]["funding_current"]
+
+    async def run_concurrently():
+        adapter = DeepcoinFundingAdapter(
+            StubTransport(handler), lambda: 1_700_000_100
+        )
+        adapter._history_pacer = funding_module._RequestStartPacer(
+            funding_module.DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS,
+            clock=fake_time.clock,
+            sleep=fake_time.sleep,
+        )
+        return await asyncio.gather(
+            adapter.fetch(
+                instrument("DEEPCOIN", symbol="BASE-QUOTE-SWAP"),
+                None,
+                include_history=True,
+            ),
+            adapter.fetch(
+                instrument("DEEPCOIN", symbol="ALT-QUOTE-SWAP"),
+                None,
+                include_history=True,
+            ),
+        )
+
+    results = asyncio.run(run_concurrently())
+
+    assert current_starts == pytest.approx([0.0, 0.0])
+    assert maximum_active_history_requests == 1
+    assert history_starts == pytest.approx([0.0, 0.25])
+    assert history_completions == pytest.approx([0.05, 0.3])
+    assert history_starts[1] - history_completions[0] == pytest.approx(0.2)
+    assert fake_time.sleep_durations == pytest.approx([0.2])
+    assert [[point.sample.rate for point in result.history] for result in results] == [
+        [Decimal("0.00008")],
+        [Decimal("0.00008")],
+    ]
+
+
+def test_paced_funding_history_pagination_preserves_every_page(monkeypatch):
+    monkeypatch.setattr(funding_module, "DEEPCOIN_FUNDING_HISTORY_LIMIT", 2)
+    fake_time = FakePacerTime()
+    history_starts: list[float] = []
+    requested_pages: list[int] = []
+
+    async def handler(method, url, params):
+        if not url.endswith("fund-rate/history"):
+            return ADDED_VENUES["deepcoin"]["funding_current"]
+        history_starts.append(fake_time.clock())
+        requested_pages.append(params["page"])
+        rows = {
+            1: [
+                {"rate": "0.00003", "CreateTime": 1_700_000_002},
+                {"rate": "0.00002", "CreateTime": 1_700_000_001},
+            ],
+            2: [{"rate": "0.00001", "CreateTime": 1_700_000_000}],
+        }[params["page"]]
+        return {"code": "0", "data": rows}
+
+    async def run_paginated_fetch():
+        adapter = DeepcoinFundingAdapter(
+            StubTransport(handler), lambda: 1_700_000_100
+        )
+        adapter._history_pacer = funding_module._RequestStartPacer(
+            funding_module.DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS,
+            clock=fake_time.clock,
+            sleep=fake_time.sleep,
+        )
+        return await adapter.fetch(
+            instrument("DEEPCOIN", symbol="BASE-QUOTE-SWAP"),
+            None,
+            include_history=True,
+        )
+
+    result = asyncio.run(run_paginated_fetch())
+
+    assert requested_pages == [1, 2]
+    assert history_starts == pytest.approx([0.0, 0.2])
+    assert fake_time.sleep_durations == pytest.approx([0.2])
+    assert [point.timestamp_ms for point in result.history] == [
+        1_700_000_000_000,
+        1_700_000_001_000,
+        1_700_000_002_000,
+    ]
+    assert [point.sample.rate for point in result.history] == [
+        Decimal("0.00001"),
+        Decimal("0.00002"),
+        Decimal("0.00003"),
+    ]

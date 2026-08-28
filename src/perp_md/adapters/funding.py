@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -41,6 +42,7 @@ GATE_FUNDING_HISTORY_LIMIT = 1_000
 KRAKEN_FUNDING_HISTORY_MAX_ROWS = 50_000
 KRAKEN_FUNDING_INTERVAL_SECONDS = 3_600
 DEEPCOIN_FUNDING_HISTORY_LIMIT = 100
+DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS = 0.2
 HTX_FUNDING_HISTORY_LIMIT = 50
 TOOBIT_FUNDING_HISTORY_LIMIT = 1_000
 GRVT_FUNDING_HISTORY_LIMIT = 1_000
@@ -67,6 +69,27 @@ class NativeFundingAdapter:
         detail = str(exc).strip()
         message = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
         return HistoryIssue("history_unavailable", message)
+
+
+@dataclass
+class _RequestStartPacer:
+    interval_seconds: float
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _last_completion: float | None = field(default=None, init=False, repr=False)
+
+    async def request(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        async with self._lock:
+            now = self.clock()
+            if self._last_completion is not None:
+                remaining = self.interval_seconds - (now - self._last_completion)
+                if remaining > 0:
+                    await self.sleep(remaining)
+            try:
+                return await operation()
+            finally:
+                self._last_completion = self.clock()
 
 
 class BinanceFundingAdapter(NativeFundingAdapter):
@@ -602,6 +625,16 @@ class KrakenFundingAdapter(NativeFundingAdapter):
 class DeepcoinFundingAdapter(NativeFundingAdapter):
     BASE_URL = "https://api.deepcoin.com/deepcoin/v2/market"
 
+    def __init__(
+        self,
+        transport: JsonTransport,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        super().__init__(transport, clock)
+        self._history_pacer = _RequestStartPacer(
+            DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS
+        )
+
     def supports(self, instrument: Instrument) -> bool:
         return instrument.venue == "DEEPCOIN"
 
@@ -653,13 +686,15 @@ class DeepcoinFundingAdapter(NativeFundingAdapter):
     ) -> tuple[FundingObservation, ...]:
         observations: dict[int, FundingObservation] = {}
         for page in range(1, FUNDING_HISTORY_MAX_PAGES + 1):
-            payload = await self.transport.get(
-                f"{self.BASE_URL}/fund-rate/history",
-                {
-                    "instId": instrument.symbol,
-                    "page": page,
-                    "limit": DEEPCOIN_FUNDING_HISTORY_LIMIT,
-                },
+            payload = await self._history_pacer.request(
+                lambda: self.transport.get(
+                    f"{self.BASE_URL}/fund-rate/history",
+                    {
+                        "instId": instrument.symbol,
+                        "page": page,
+                        "limit": DEEPCOIN_FUNDING_HISTORY_LIMIT,
+                    },
+                )
             )
             rows = _deepcoin_history_rows(payload)
             oldest_timestamp: int | None = None

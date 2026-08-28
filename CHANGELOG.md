@@ -3,6 +3,12 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.2 - 2026-08-28
+
+- Serialize native funding-history page requests with a 200-millisecond
+  post-completion interval for a route-local request budget, without changing
+  current funding acquisition or successful pagination results.
+
 ## 0.3.1 - 2026-08-28
 
 - Follow documented identifier-cursor direction when traversing older settled
