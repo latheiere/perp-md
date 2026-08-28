@@ -3,6 +3,17 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.1 - 2026-08-28
+
+- Follow documented identifier-cursor direction when traversing older settled
+  funding pages.
+- Accept documented successful funding-history envelopes and classify explicit
+  empty slices as valid absence rather than malformed responses.
+- Confirm bounded history exhaustion when an endpoint can return fewer rows
+  than its requested maximum before the requested range is complete.
+- Preserve valid optional-provider current funding when historical interval
+  enrichment cannot prove an unambiguous window.
+
 ## 0.3.0 - 2026-08-28
 
 - Add documented native open-interest and funding acquisition for ranked

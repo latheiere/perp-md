@@ -6,7 +6,9 @@
     "history_marks_partial": {"code":"0","msg":"Success","data":[["1700000100000","19","21","18","20","0","0"]]},
     "malformed": {"code":"0","msg":"Success","data":{"ts":"1700000100000"}},
     "funding_current": {"code":"0","msg":"Success","data":[{"instId":"BASEQUOTE","fundingRate":"0.0001","settleInterval":28800,"nextSettleTime":1700028800}]},
-    "funding_history": {"code":"0","msg":"Success","data":{"list":[{"instId":"BASEQUOTE","rate":"0.00008","CreateTime":1699971200,"ratePeriodSec":8}]}}
+    "funding_history": {"code":"0","msg":"Success","data":{"list":[{"instId":"BASEQUOTE","rate":"0.00008","CreateTime":1699971200,"ratePeriodSec":8}]}},
+    "funding_history_flat": {"code":"0","msg":"Success","data":[{"instId":"BASEQUOTE","rate":"0.00008","CreateTime":1699971200,"ratePeriodSec":8}]},
+    "funding_history_empty": {"code":"0","msg":"Success","data":[]}
   },
   "kucoin": {
     "current": {"code":"200000","data":{"symbol":"BASEQUOTEM","openInterest":"200","markPrice":"10","multiplier":"0.01"}},
@@ -15,7 +17,8 @@
     "marks_partial": {"code":"200000","data":[[1700000100,"9","11","8","10","1","10"]]},
     "malformed": {"code":"200000","data":[{"openInterest":"200"}]},
     "funding_current": {"code":"200000","data":{"symbol":".BASEQUOTEMFPI8H","granularity":28800000,"timePoint":1700000000000,"value":"0.0001","predictedValue":"0.0002","fundingTime":1700028800000}},
-    "funding_history": {"code":"200000","data":[{"symbol":"BASEQUOTEM","fundingRate":"0.00008","timepoint":1699971200000}]}
+    "funding_history": {"code":"200000","data":[{"symbol":"BASEQUOTEM","fundingRate":"0.00008","timepoint":1699971200000}]},
+    "funding_history_empty": {"code":"200000","data":null}
   },
   "htx": {
     "current": {"status":"ok","data":[{"volume":300,"amount":"3","value":"30","contract_code":"BASE-QUOTE"}],"ts":1700000100000},
@@ -34,7 +37,11 @@
     "current_mark": {"exchangeId":301,"symbolId":"BASE-SWAP-QUOTE","price":"5","time":1700000100000},
     "malformed": {"openInterestList":{"size":"4"}},
     "funding_current": [{"symbol":"BASE-SWAP-QUOTE","rate":"0.0001","period":"8H","nextFundingTime":"1700028800000"}],
-    "funding_history": [{"id":2,"symbol":"BASE-SWAP-QUOTE","settleTime":1699971200000,"settleRate":"0.00008","period":"8H"}]
+    "funding_history": [{"id":2,"symbol":"BASE-SWAP-QUOTE","settleTime":1699971200000,"settleRate":"0.00008","period":"8H"}],
+    "funding_history_pages": [
+      [{"id":4,"symbol":"BASE-SWAP-QUOTE","settleTime":1700000000000,"settleRate":"0.0001","period":"8H"},{"id":3,"symbol":"BASE-SWAP-QUOTE","settleTime":1699971200000,"settleRate":"0.00008","period":"8H"}],
+      [{"id":2,"symbol":"BASE-SWAP-QUOTE","settleTime":1699942400000,"settleRate":"0.00007","period":"8H"}]
+    ]
   },
   "xt": {
     "current": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"BASE_QUOTE","openInterest":"4","openInterestUsd":"20","time":1700000100000}},

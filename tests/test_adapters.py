@@ -1289,6 +1289,33 @@ def test_exact_mark_history_join_reports_missing_buckets_without_losing_current(
     assert result.history_issue.code == "history_partial"
 
 
+def test_capped_history_pages_continue_until_the_requested_range_is_exhausted():
+    async def handler(method, url, params):
+        if params["endTime"] == 10_000:
+            return {
+                "code": "0",
+                "data": [
+                    {"ts": "10000", "oi": "10"},
+                    {"ts": "9000", "oi": "9"},
+                ],
+            }
+        return {
+            "code": "0",
+            "data": [{"ts": "8000", "oi": "8"}],
+        }
+
+    transport = StubTransport(handler)
+    rows = asyncio.run(
+        DeepcoinAdapter(transport)._history(
+            instrument("DEEPCOIN", symbol="BASE-QUOTE-SWAP"),
+            HistoryRange(8_500, 10_000),
+        )
+    )
+
+    assert [row["ts"] for row in rows] == ["9000", "10000"]
+    assert [request[2]["endTime"] for request in transport.requests] == [10_000, 8_999]
+
+
 @pytest.mark.parametrize(
     ("adapter", "venue", "symbol"),
     [

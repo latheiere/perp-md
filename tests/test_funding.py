@@ -17,6 +17,7 @@ from perp_md import (
     InvalidInstrument,
     InvalidResponse,
 )
+from perp_md.adapters import funding as funding_module
 from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.adapters.funding import (
     BinanceFundingAdapter,
@@ -128,6 +129,39 @@ def test_ranked_native_funding_keeps_valid_current_when_history_is_malformed(
     assert result.current.rate == pytest.approx(0.0001)
     assert result.history == ()
     assert result.history_issue is not None
+
+
+def test_identifier_cursor_history_uses_the_older_page_direction(monkeypatch):
+    fixture = ADDED_VENUES["toobit"]
+    pages = fixture["funding_history_pages"]
+    monkeypatch.setattr(funding_module, "TOOBIT_FUNDING_HISTORY_LIMIT", 2)
+
+    async def handler(method, url, params):
+        if url.endswith("fundingRate"):
+            return fixture["funding_current"]
+        return pages[1] if params.get("fromId") == 3 else pages[0]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        ToobitFundingAdapter(transport, lambda: 1_700_000_100).fetch(
+            instrument("TOOBIT", symbol="BASE-SWAP-QUOTE"),
+            HistoryRange(1_699_940_000_000),
+            include_history=True,
+        )
+    )
+
+    history_requests = [request for request in transport.requests if "history" in request[1]]
+    assert history_requests[1][2] == {
+        "symbol": "BASE-SWAP-QUOTE",
+        "limit": 2,
+        "fromId": 3,
+    }
+    assert [point.timestamp_ms for point in result.history] == [
+        1_699_942_400_000,
+        1_699_971_200_000,
+        1_700_000_000_000,
+    ]
+    assert result.history_issue is None
 
 
 def test_relative_current_and_settled_history_preserve_temporal_semantics():
@@ -535,6 +569,36 @@ def test_history_only_optional_runtime_keeps_settled_current_semantics():
     assert result.history == ()
 
 
+def test_optional_history_normalization_failure_preserves_current_snapshot():
+    class Exchange:
+        has = {
+            "fetchFundingRate": True,
+            "fetchFundingRateHistory": True,
+        }
+
+        async def fetch_funding_rate(self, symbol):
+            return {"timestamp": 1_700_000_000_000, "fundingRate": "0.0001"}
+
+        async def fetch_funding_rate_history(self, symbol, *, since, limit):
+            return [
+                {"timestamp": 1_699_999_998_993, "fundingRate": "0.00008"},
+                {"timestamp": 1_700_000_000_000, "fundingRate": "0.00009"},
+            ]
+
+    class Adapter(CcxtFundingAdapter):
+        async def _market(self, subject):
+            return Exchange(), "EXACT-ENDPOINT-ID"
+
+    result = asyncio.run(
+        Adapter().fetch(instrument("ASTER"), None, include_history=True)
+    )
+
+    assert result.current.sample.rate == Decimal("0.0001")
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert "unambiguous" in result.history_issue.message
+
+
 @pytest.mark.parametrize(
     ("symbol", "direction", "expected_rate", "method_id"),
     [
@@ -725,3 +789,85 @@ def test_malformed_native_funding_history_preserves_current_snapshot():
     assert result.history == ()
     assert result.history_issue is not None
     assert result.history_issue.code == "history_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "symbol", "history_fixture"),
+    [
+        (
+            DeepcoinFundingAdapter,
+            "DEEPCOIN",
+            "BASE-QUOTE-SWAP",
+            "funding_history_empty",
+        ),
+        (
+            KucoinFundingAdapter,
+            "KUCOIN",
+            "BASEQUOTEM",
+            "funding_history_empty",
+        ),
+    ],
+)
+def test_successful_empty_native_funding_slice_is_not_a_history_failure(
+    adapter, venue, symbol, history_fixture
+):
+    fixture = ADDED_VENUES[venue.lower()]
+
+    async def handler(method, url, params):
+        is_history = "fund-rate/history" in url or "contract/funding-rates" in url
+        return fixture[history_fixture] if is_history else fixture["funding_current"]
+
+    result = asyncio.run(
+        adapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol=symbol),
+            HistoryRange(1_699_000_000_000, 1_699_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert result.history == ()
+    assert result.history_issue is None
+
+
+def test_missing_native_funding_history_member_is_reported():
+    fixture = ADDED_VENUES["kucoin"]
+
+    async def handler(method, url, params):
+        if "contract/funding-rates" in url:
+            return {"code": "200000"}
+        return fixture["funding_current"]
+
+    result = asyncio.run(
+        KucoinFundingAdapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument("KUCOIN", symbol="BASEQUOTEM"),
+            HistoryRange(1_699_000_000_000, 1_699_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.rate == pytest.approx(0.0001)
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+
+
+def test_flat_successful_native_funding_envelope_is_accepted():
+    fixture = ADDED_VENUES["deepcoin"]
+
+    async def handler(method, url, params):
+        return (
+            fixture["funding_history_flat"]
+            if url.endswith("fund-rate/history")
+            else fixture["funding_current"]
+        )
+
+    result = asyncio.run(
+        DeepcoinFundingAdapter(StubTransport(handler), lambda: 1_700_000_100).fetch(
+            instrument("DEEPCOIN", symbol="BASE-QUOTE-SWAP"),
+            HistoryRange(1_699_000_000_000, 1_700_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert [point.sample.rate for point in result.history] == [Decimal("0.00008")]
+    assert result.history_issue is None

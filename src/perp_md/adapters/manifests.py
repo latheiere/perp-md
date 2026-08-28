@@ -1860,7 +1860,7 @@ BUILTIN_ADAPTER_MANIFESTS = (
             "TOOBIT", "swap", "SWAP", "linear",
             adapter_id="native.toobit", oi_source="size", native_unit="base",
             funding_kind=DataPointKind.FUNDING_NEXT_RATE,
-            funding_history=BOUNDED_SINGLE_PAGE,
+            funding_history=BOUNDED_HISTORY,
         ),),
     ),
     _manifest(

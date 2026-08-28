@@ -88,7 +88,8 @@ class CcxtFundingAdapter(CcxtAdapter):
                     )
                 current_payload = candidate
 
-            history_payload: Any = []
+            retrieved_at_ms = int(time.time() * 1_000)
+            history_rows: tuple[FundingObservation, ...] = ()
             history_issue: HistoryIssue | None = None
             if has_history and (include_history or not has_current):
                 try:
@@ -97,6 +98,11 @@ class CcxtFundingAdapter(CcxtAdapter):
                         since=history.start_ms if history else None,
                         limit=CCXT_FUNDING_HISTORY_LIMIT if include_history else 1,
                     )
+                    history_rows = self._history_rows(
+                        history_payload,
+                        history,
+                        retrieved_at_ms=retrieved_at_ms,
+                    )
                 except Exception as exc:
                     if not has_current:
                         raise
@@ -104,12 +110,6 @@ class CcxtFundingAdapter(CcxtAdapter):
                         "history_unavailable", self._summary(exc)
                     )
 
-            retrieved_at_ms = int(time.time() * 1_000)
-            history_rows = self._history_rows(
-                history_payload,
-                history,
-                retrieved_at_ms=retrieved_at_ms,
-            )
             if current_payload.get("fundingRate") is not None:
                 timestamp = current_payload.get("timestamp")
                 current = self._observation(
