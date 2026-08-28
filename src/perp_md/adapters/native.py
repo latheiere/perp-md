@@ -795,6 +795,7 @@ class DeepcoinAdapter(NativeAdapter):
             DEEPCOIN_HISTORY_LIMIT,
             requested,
             coded=True,
+            stop_on_short_page=requested is None or requested.start_ms is None,
         )
 
     async def _marks(
@@ -2211,6 +2212,7 @@ async def _backward_dict_history(
     *,
     coded: bool = False,
     kucoin: bool = False,
+    stop_on_short_page: bool = True,
 ) -> list[dict[str, Any]]:
     rows: dict[int, dict[str, Any]] = {}
     page_end = base.get("endTime", base.get("endAt"))
@@ -2235,7 +2237,9 @@ async def _backward_dict_history(
             if (start is None or timestamp >= start) and (end is None or timestamp <= end):
                 rows[timestamp] = row
         oldest = min(timestamps)
-        if len(page) < limit or (start is not None and oldest <= start):
+        if (stop_on_short_page and len(page) < limit) or (
+            start is not None and oldest <= start
+        ):
             return [rows[key] for key in sorted(rows)]
         advanced = oldest - 1
         if page_end is not None and advanced >= page_end:

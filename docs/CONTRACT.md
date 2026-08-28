@@ -281,6 +281,13 @@ malformed or unavailable optional history preserves a valid current result and
 returns `HistoryIssue`. A full-retained history endpoint requires an explicit
 start and enforces a finite row bound; omitting the start produces a structured,
 non-retryable history issue without discarding current data.
+Successful provider envelopes that explicitly contain no history are represented
+as an empty history, including slices before an instrument's first settlement.
+For endpoints whose row limit is a maximum rather than a full-page guarantee, a
+short page alone does not prove that the requested history range is exhausted.
+When optional history rows are valid but their boundary spacing cannot prove an
+integer-second observed window, the current result is preserved and the history
+failure is reported independently.
 
 When a provider labels a published rate with a future settlement boundary, the
 sample is represented as `FundingRateKind.NEXT` with that boundary as

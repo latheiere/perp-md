@@ -662,8 +662,14 @@ class DeepcoinFundingAdapter(NativeFundingAdapter):
                 },
             )
             rows = _deepcoin_history_rows(payload)
+            oldest_timestamp: int | None = None
             for row in rows:
                 timestamp = _timestamp_ms(row.get("CreateTime"))
+                oldest_timestamp = (
+                    timestamp
+                    if oldest_timestamp is None
+                    else min(oldest_timestamp, timestamp)
+                )
                 if requested is None or (
                     (requested.start_ms is None or timestamp >= requested.start_ms)
                     and (requested.end_ms is None or timestamp <= requested.end_ms)
@@ -676,7 +682,15 @@ class DeepcoinFundingAdapter(NativeFundingAdapter):
                         retrieved_at_ms=retrieved_at_ms,
                         source_observation="funding.settled_rate",
                     )
-            if len(rows) < DEEPCOIN_FUNDING_HISTORY_LIMIT:
+            if (
+                len(rows) < DEEPCOIN_FUNDING_HISTORY_LIMIT
+                or (
+                    requested is not None
+                    and requested.start_ms is not None
+                    and oldest_timestamp is not None
+                    and oldest_timestamp <= requested.start_ms
+                )
+            ):
                 return preserve_observed_intervals(
                     tuple(observations[key] for key in sorted(observations))
                 )
@@ -851,14 +865,14 @@ class ToobitFundingAdapter(NativeFundingAdapter):
             return FundingResult(current)
         try:
             normalized: dict[int, FundingObservation] = {}
-            end_id: int | None = None
+            from_id: int | None = None
             for _ in range(FUNDING_HISTORY_MAX_PAGES):
                 params: dict[str, Any] = {
                     "symbol": instrument.symbol,
                     "limit": TOOBIT_FUNDING_HISTORY_LIMIT,
                 }
-                if end_id is not None:
-                    params["endId"] = end_id
+                if from_id is not None:
+                    params["fromId"] = from_id
                 payload = await self.transport.get(
                     f"{self.BASE_URL}/api/v1/futures/historyFundingRate", params
                 )
@@ -884,10 +898,9 @@ class ToobitFundingAdapter(NativeFundingAdapter):
                         ),
                     )
                 oldest_id = min(int(row["id"]) for row in rows)
-                advanced = oldest_id - 1
-                if end_id is not None and advanced >= end_id:
+                if from_id is not None and oldest_id >= from_id:
                     raise PaginationError("funding history pagination did not advance")
-                end_id = advanced
+                from_id = oldest_id
             raise PaginationError("funding history exceeded the bounded page limit")
         except Exception as exc:
             return FundingResult(current, history_issue=self._issue(exc))
@@ -1338,14 +1351,23 @@ def _deepcoin_history_rows(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict) or str(payload.get("code")) != "0":
         raise InvalidResponse("provider rejected the funding history request")
     data = payload.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+    rows = data.get("list") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
         raise InvalidResponse("provider returned an invalid funding history")
-    if any(not isinstance(row, dict) for row in data["list"]):
+    if any(not isinstance(row, dict) for row in rows):
         raise InvalidResponse("provider returned an invalid funding history row")
-    return data["list"]
+    return rows
 
 
 def _kucoin_funding_data(payload: Any, description: str, expected: type) -> Any:
+    if (
+        expected is list
+        and isinstance(payload, dict)
+        and str(payload.get("code")) == "200000"
+        and "data" in payload
+        and payload.get("data") is None
+    ):
+        return []
     if (
         not isinstance(payload, dict)
         or str(payload.get("code")) != "200000"
