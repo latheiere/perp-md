@@ -20,6 +20,7 @@ from perp_md import (
 from perp_md.adapters import funding as funding_module
 from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.adapters.funding import (
+    BitfinexFundingAdapter,
     BinanceFundingAdapter,
     BybitFundingAdapter,
     DeepcoinFundingAdapter,
@@ -31,8 +32,11 @@ from perp_md.adapters.funding import (
     KrakenFundingAdapter,
     KucoinFundingAdapter,
     LighterFundingAdapter,
+    MexcFundingAdapter,
     OkxFundingAdapter,
     ToobitFundingAdapter,
+    XtFundingAdapter,
+    native_funding_adapters,
 )
 
 FIXTURE = json.loads(
@@ -781,6 +785,188 @@ def test_added_native_malformed_funding_is_rejected(adapter, venue, symbol):
                 instrument(venue, symbol=symbol), None, include_history=False
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "fixture_key"),
+    [
+        (MexcFundingAdapter, "MEXC", "mexc_funding"),
+        (XtFundingAdapter, "XT", "xt"),
+    ],
+)
+def test_native_next_rate_and_settled_history_preserve_provider_intervals(
+    adapter, venue, fixture_key
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        if "history" in url or url.endswith("funding-rate-record"):
+            if "page_num" in params:
+                page = params["page_num"]
+            else:
+                page = 1 if "id" not in params else 2
+            key = "history_pages" if venue == "MEXC" else "funding_history_pages"
+            return fixture[key][page - 1]
+        return fixture["current" if venue == "MEXC" else "funding_current"]
+
+    transport = StubTransport(handler)
+    result = asyncio.run(
+        adapter(transport, lambda: 1_700_000_100).fetch(
+            instrument(venue, symbol="BASE_QUOTE"),
+            HistoryRange(1_699_900_000_000, 1_700_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.kind is FundingRateKind.NEXT
+    assert result.current.sample.lineage.output.temporal_mode is TemporalMode.NEXT
+    assert result.current.timestamp_ms == 1_700_028_800_000
+    assert result.current.interval.kind is FundingIntervalKind.EXPLICIT_DURATION
+    assert result.current.interval.duration_seconds == 28_800
+    assert [point.kind for point in result.history] == [FundingRateKind.SETTLED] * 3
+    assert [point.timestamp_ms for point in result.history] == [
+        1_699_942_400_000,
+        1_699_971_200_000,
+        1_700_000_000_000,
+    ]
+    assert all(point.interval.duration_seconds == 28_800 for point in result.history)
+    assert result.history_issue is None
+    history_requests = [
+        request
+        for request in transport.requests
+        if "history" in request[1] or request[1].endswith("funding-rate-record")
+    ]
+    assert len(history_requests) == 2
+    if venue == "MEXC":
+        assert [request[2]["page_num"] for request in history_requests] == [1, 2]
+    else:
+        assert history_requests[0][2] == {"symbol": "BASE_QUOTE", "limit": 200}
+        assert history_requests[1][2] == {
+            "symbol": "BASE_QUOTE",
+            "limit": 200,
+            "direction": "NEXT",
+            "id": 3,
+        }
+
+
+def test_native_status_funding_is_current_only_and_uses_exact_endpoint_identity():
+    fixture = ADDED_VENUES["bitfinex"]
+
+    async def handler(method, url, params):
+        assert url.endswith("/status/deriv")
+        assert params == {"keys": "tBASEF0:QUOTEF0"}
+        return fixture["funding_current"]
+
+    transport = StubTransport(handler)
+    adapter = BitfinexFundingAdapter(transport, lambda: 1_700_000_100)
+    subject = instrument(
+        "BITFINEX", symbol="BASEQUOTE", pair_symbol="tBASEF0:QUOTEF0"
+    )
+    result = asyncio.run(
+        adapter.fetch(subject, HistoryRange(1_699_000_000_000), include_history=True)
+    )
+
+    assert result.current.kind is FundingRateKind.INDICATIVE
+    assert result.current.sample.lineage.output.temporal_mode is TemporalMode.CURRENT
+    assert result.current.timestamp_ms == 1_700_000_100_000
+    assert result.current.interval.duration_seconds == 28_800
+    assert result.history == ()
+    assert result.history_issue is None
+    assert len(transport.requests) == 1
+    assert adapter.capabilities(subject).history is False
+
+
+def test_proven_native_funding_routes_are_registered_without_optional_runtime():
+    adapters = native_funding_adapters(StubTransport(None))
+
+    assert isinstance(adapters["MEXC"], MexcFundingAdapter)
+    assert isinstance(adapters["XT"], XtFundingAdapter)
+    assert isinstance(adapters["BITFINEX"], BitfinexFundingAdapter)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "fixture_key", "symbol", "fixture_name"),
+    [
+        (MexcFundingAdapter, "MEXC", "mexc_funding", "BASE_QUOTE", "malformed"),
+        (XtFundingAdapter, "XT", "xt", "BASE_QUOTE", "funding_malformed"),
+        (
+            BitfinexFundingAdapter,
+            "BITFINEX",
+            "bitfinex",
+            "BASEQUOTE",
+            "funding_malformed",
+        ),
+    ],
+)
+def test_native_funding_rejects_mismatched_endpoint_identity(
+    adapter, venue, fixture_key, symbol, fixture_name
+):
+    fixture = ADDED_VENUES[fixture_key]
+
+    async def handler(method, url, params):
+        return fixture[fixture_name]
+
+    subject = instrument(
+        venue,
+        symbol=symbol,
+        pair_symbol="tBASEF0:QUOTEF0" if venue == "BITFINEX" else None,
+    )
+    with pytest.raises(InvalidResponse):
+        asyncio.run(adapter(StubTransport(handler)).fetch(subject, None, include_history=False))
+
+
+@pytest.mark.parametrize(
+    ("adapter", "venue", "current_fixture", "malformed_history"),
+    [
+        (
+            MexcFundingAdapter,
+            "MEXC",
+            ADDED_VENUES["mexc_funding"]["current"],
+            {"success": True, "code": 0, "data": {"resultList": "invalid"}},
+        ),
+        (
+            XtFundingAdapter,
+            "XT",
+            ADDED_VENUES["xt"]["funding_current"],
+            {"returnCode": 0, "result": {"items": "invalid"}},
+        ),
+    ],
+)
+def test_native_malformed_history_preserves_valid_current(
+    adapter, venue, current_fixture, malformed_history
+):
+    async def handler(method, url, params):
+        is_history = (params and "limit" in params) or "history" in url
+        return malformed_history if is_history else current_fixture
+
+    result = asyncio.run(
+        adapter(StubTransport(handler)).fetch(
+            instrument(venue, symbol="BASE_QUOTE"), None, include_history=True
+        )
+    )
+
+    assert result.current.kind is FundingRateKind.NEXT
+    assert result.history == ()
+    assert result.history_issue is not None
+    assert result.history_issue.code == "history_unavailable"
+
+
+def test_page_number_history_accepts_zero_pages_for_an_empty_result():
+    fixture = ADDED_VENUES["mexc_funding"]
+
+    async def handler(method, url, params):
+        return fixture["history_empty"] if "history" in url else fixture["current"]
+
+    result = asyncio.run(
+        MexcFundingAdapter(StubTransport(handler)).fetch(
+            instrument("MEXC", symbol="BASE_QUOTE"),
+            HistoryRange(1_699_000_000_000, 1_699_100_000_000),
+            include_history=True,
+        )
+    )
+
+    assert result.history == ()
+    assert result.history_issue is None
 
 
 def test_malformed_native_funding_history_preserves_current_snapshot():
