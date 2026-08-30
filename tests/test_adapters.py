@@ -60,6 +60,9 @@ MEXC_REJECTED = json.loads(
 CCXT_HOURLY = json.loads(
     (Path(__file__).parent / "fixtures" / "ccxt_hourly_open_interest.json").read_text()
 )
+CCXT_BASE_QUANTITY = json.loads(
+    (Path(__file__).parent / "fixtures" / "ccxt_base_quantity_open_interest.json").read_text()
+)
 HYPERLIQUID_CONTEXTS = json.loads(
     (Path(__file__).parent / "fixtures" / "hyperliquid_meta_contexts.json").read_text()
 )
@@ -1676,6 +1679,59 @@ def test_ranked_optional_metrics_use_exact_runtime_provider_ids():
         "CRYPTOCOM": "cryptocom",
         "BLOFIN": "blofin",
     }
+
+
+@pytest.mark.parametrize("payload_key", ["current", "malformed"])
+def test_standardized_base_quantity_open_interest_uses_mark_without_contract_scaling(
+    monkeypatch, payload_key
+):
+    fixture = CCXT_BASE_QUANTITY
+
+    class Exchange:
+        has = {"fetchOpenInterest": True, "fetchOpenInterestHistory": False}
+        markets_by_id = {
+            fixture["market_id"]: [{"symbol": fixture["symbol"], "contract": True}]
+        }
+
+        async def fetch_open_interest(self, symbol):
+            assert symbol == fixture["symbol"]
+            return fixture[payload_key]
+
+        async def fetch_ticker(self, symbol):
+            assert symbol == fixture["symbol"]
+            return fixture["ticker"]
+
+        async def close(self):
+            return None
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        ccxt_adapter_module.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(weex=object),
+    )
+    adapter = CcxtAdapter()
+    adapter.exchanges["WEEX"] = exchange
+    subject = instrument(
+        "WEEX",
+        symbol=fixture["market_id"],
+        contract_multiplier=0.01,
+    )
+
+    if payload_key == "malformed":
+        with pytest.raises(InvalidResponse):
+            asyncio.run(adapter.fetch(subject, None, include_history=False))
+        return
+
+    result = asyncio.run(adapter.fetch(subject, None, include_history=False))
+
+    assert result.current.native_value == pytest.approx(125.5)
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.base_quantity is not None
+    assert float(result.current.base_quantity.amount) == pytest.approx(125.5)
+    assert result.current.value_usd == pytest.approx(2_510)
+    assert result.current.mark_price == pytest.approx(20)
+    assert result.current.valuation is ValuationMethod.MARK_PRICE
 
 
 def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkeypatch):

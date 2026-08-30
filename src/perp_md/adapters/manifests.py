@@ -73,6 +73,11 @@ BOUNDED_SINGLE_PAGE = RetrievalDeclaration(
     HistoryScope.BOUNDED,
     PaginationMode.SINGLE_PAGE,
 )
+BOUNDED_PAGE_NUMBER = RetrievalDeclaration(
+    RequestScope.INSTRUMENT,
+    HistoryScope.BOUNDED,
+    PaginationMode.PAGE_NUMBER,
+)
 SINGLE_PAGE_HISTORY = RetrievalDeclaration(
     RequestScope.INSTRUMENT,
     HistoryScope.LATEST_WINDOW,
@@ -721,7 +726,7 @@ def _bitfinex(direction: str) -> NativeProductMapping:
     )
     return _mapping(
         "BITFINEX",
-        "hybrid.bitfinex",
+        "native.bitfinex",
         "f0",
         direction,
         ("F0",),
@@ -763,21 +768,16 @@ def _bitfinex(direction: str) -> NativeProductMapping:
                 prefix,
                 DataPointKind.FUNDING_INDICATIVE_RATE,
                 TemporalMode.CURRENT,
-                RUNTIME_CURRENT,
-                runtime=_CCXT_FUNDING_CURRENT_RUNTIME,
-                limitations=(
-                    "availability is determined by the installed optional provider runtime",
-                ),
+                CURRENT,
+                identity=identity,
             ),
-            _funding(
-                prefix,
-                DataPointKind.FUNDING_SETTLED_RATE,
-                TemporalMode.HISTORICAL,
-                RUNTIME_HISTORY,
-                runtime=_CCXT_FUNDING_HISTORY_RUNTIME,
-                limitations=(
-                    "availability is determined by the installed optional provider runtime",
-                ),
+            _capability(
+                f"{prefix}.funding-interval.current",
+                DataPointKind.FUNDING_INTERVAL,
+                TemporalMode.CURRENT,
+                "documented_funding_interval",
+                CURRENT,
+                identity=identity,
             ),
         ),
     )
@@ -1403,7 +1403,7 @@ def _mexc(direction: str) -> NativeProductMapping:
     )
     return _mapping(
         "MEXC",
-        "hybrid.mexc",
+        "native.mexc",
         "perp",
         direction,
         ("PERP",),
@@ -1421,23 +1421,22 @@ def _mexc(direction: str) -> NativeProductMapping:
             ),
             _funding(
                 prefix,
-                DataPointKind.FUNDING_INDICATIVE_RATE,
-                TemporalMode.CURRENT,
-                RUNTIME_CURRENT,
-                runtime=_CCXT_FUNDING_CURRENT_RUNTIME,
-                limitations=(
-                    "availability is determined by the installed optional provider runtime",
-                ),
+                DataPointKind.FUNDING_NEXT_RATE,
+                TemporalMode.NEXT,
+                CURRENT,
             ),
             _funding(
                 prefix,
                 DataPointKind.FUNDING_SETTLED_RATE,
                 TemporalMode.HISTORICAL,
-                RUNTIME_HISTORY,
-                runtime=_CCXT_FUNDING_HISTORY_RUNTIME,
-                limitations=(
-                    "availability is determined by the installed optional provider runtime",
-                ),
+                BOUNDED_PAGE_NUMBER,
+            ),
+            _capability(
+                f"{prefix}.funding-interval.current",
+                DataPointKind.FUNDING_INTERVAL,
+                TemporalMode.CURRENT,
+                "collectCycle",
+                CURRENT,
             ),
         ),
     )
@@ -1577,13 +1576,13 @@ def _optional_mapping(
         if provider == "COINBASE"
         else _CCXT_RUNTIME
     )
+    amount_is_base = provider == "WEEX"
     base = (
         (
-            _converted_base(
-                prefix,
-                TemporalMode.CURRENT,
-                RUNTIME_CURRENT,
-                identity=oi_identity,
+            _native_base(prefix, TemporalMode.CURRENT, RUNTIME_CURRENT, identity=oi_identity)
+            if amount_is_base
+            else _converted_base(
+                prefix, TemporalMode.CURRENT, RUNTIME_CURRENT, identity=oi_identity
             ),
         )
         if direction == "linear" and provider != "BINGX"
@@ -1594,7 +1593,7 @@ def _optional_mapping(
     )
     amount_only = provider in {"BTSE", "WEEX"}
     value_only = provider == "BINGX"
-    current_count = () if value_only else (
+    current_count = () if value_only or amount_is_base else (
         _capability(
             f"{prefix}.open-interest.contract-count.current",
             DataPointKind.OPEN_INTEREST_CONTRACT_COUNT,
@@ -1617,13 +1616,15 @@ def _optional_mapping(
         methods=(
             (
                 DerivationKind.CANONICAL_CONVERSION,
-                "open_interest.contracts_to_reporting.at_mark.v1",
+                "open_interest.base_to_quote.at_mark.v1"
+                if amount_is_base
+                else "open_interest.contracts_to_reporting.at_mark.v1",
             ),
         )
         if amount_only
         else (),
         identity=oi_identity,
-        instrument=_CONTRACT_VALUE if amount_only else (),
+        instrument=_CONTRACT_VALUE if amount_only and not amount_is_base else (),
         observations=("mark_price",) if amount_only else (),
         runtime=oi_runtime,
         limitations=runtime_limit,
@@ -1952,17 +1953,22 @@ BUILTIN_ADAPTER_MANIFESTS = (
                     ),
                     _funding(
                         "xt.perpetual.linear",
-                        DataPointKind.FUNDING_INDICATIVE_RATE,
-                        TemporalMode.CURRENT,
-                        RUNTIME_CURRENT,
-                        runtime=_CCXT_FUNDING_CURRENT_RUNTIME,
+                        DataPointKind.FUNDING_NEXT_RATE,
+                        TemporalMode.NEXT,
+                        CURRENT,
                     ),
                     _funding(
                         "xt.perpetual.linear",
                         DataPointKind.FUNDING_SETTLED_RATE,
                         TemporalMode.HISTORICAL,
-                        RUNTIME_HISTORY,
-                        runtime=_CCXT_FUNDING_HISTORY_RUNTIME,
+                        BOUNDED_HISTORY,
+                    ),
+                    _capability(
+                        "xt.perpetual.linear.funding-interval.current",
+                        DataPointKind.FUNDING_INTERVAL,
+                        TemporalMode.CURRENT,
+                        "collectionInternal",
+                        CURRENT,
                     ),
                 ),
             ),

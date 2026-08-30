@@ -311,7 +311,7 @@ def test_documentation_insufficient_open_interest_is_absent_while_funding_remain
     assert "funding.settled_rate" in kinds
 
 
-def test_native_notional_and_optional_funding_share_one_exact_product_mapping():
+def test_native_notional_and_funding_share_one_exact_product_mapping():
     mapping = next(
         mapping
         for mapping in coverage_manifest()["mappings"]
@@ -322,8 +322,9 @@ def test_native_notional_and_optional_funding_share_one_exact_product_mapping():
     assert mapping["adapter_id"] == "native.xt"
     assert {item["datapoint"]["kind"] for item in capabilities} == {
         "open_interest.notional",
-        "funding.indicative_rate",
+        "funding.next_rate",
         "funding.settled_rate",
+        "funding.interval",
     }
     oi = next(
         item
@@ -340,20 +341,12 @@ def test_native_notional_and_optional_funding_share_one_exact_product_mapping():
         native_identities=identity(),
         temporal_mode=TemporalMode.CURRENT,
     )
-    funding_without_runtime = assess_capability(
-        "XT",
-        DataPointKind.FUNDING_INDICATIVE_RATE,
-        subject,
-        native_identities=identity(),
-        temporal_mode=TemporalMode.CURRENT,
-    )
     current_funding = assess_capability(
         "XT",
-        DataPointKind.FUNDING_INDICATIVE_RATE,
+        DataPointKind.FUNDING_NEXT_RATE,
         subject,
         native_identities=identity(),
-        temporal_mode=TemporalMode.CURRENT,
-        runtime_features=(CCXT_FUNDING_FEATURE,),
+        temporal_mode=TemporalMode.NEXT,
     )
     historical_funding = assess_capability(
         "XT",
@@ -361,13 +354,82 @@ def test_native_notional_and_optional_funding_share_one_exact_product_mapping():
         subject,
         native_identities=identity(),
         temporal_mode=TemporalMode.HISTORICAL,
-        runtime_features=(CCXT_FUNDING_HISTORY_FEATURE,),
     )
 
     assert native_oi.status is CapabilityStatus.SUPPORTED
-    assert funding_without_runtime.status is CapabilityStatus.RUNTIME_UNAVAILABLE
     assert current_funding.status is CapabilityStatus.SUPPORTED
     assert historical_funding.status is CapabilityStatus.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("mapping_id", "adapter_id", "expected_funding", "history_pagination"),
+    [
+        (
+            "mexc.perp.linear.perpetual.v1",
+            "native.mexc",
+            {"funding.next_rate", "funding.settled_rate", "funding.interval"},
+            "page_number",
+        ),
+        (
+            "xt.perpetual.linear.perpetual.v1",
+            "native.xt",
+            {"funding.next_rate", "funding.settled_rate", "funding.interval"},
+            "time_cursor",
+        ),
+        (
+            "bitfinex.f0.linear.perpetual.v1",
+            "native.bitfinex",
+            {"funding.indicative_rate", "funding.interval"},
+            None,
+        ),
+    ],
+)
+def test_native_funding_manifests_declare_only_proven_temporal_products(
+    mapping_id, adapter_id, expected_funding, history_pagination
+):
+    mapping = next(
+        item
+        for item in coverage_manifest()["mappings"]
+        if item["mapping_id"] == mapping_id
+    )
+    funding = [
+        item
+        for item in mapping["capabilities"]
+        if item["datapoint"]["kind"].startswith("funding.")
+    ]
+
+    assert mapping["adapter_id"] == adapter_id
+    assert {item["datapoint"]["kind"] for item in funding} == expected_funding
+    assert all(not item["requirements"]["runtime_features"] for item in funding)
+    historical = [
+        item
+        for item in funding
+        if item["datapoint"]["temporal_mode"] == "historical"
+    ]
+    assert [item["retrieval"]["pagination"] for item in historical] == (
+        [history_pagination] if history_pagination is not None else []
+    )
+
+
+def test_standardized_base_amount_manifest_does_not_require_contract_metadata():
+    mapping = next(
+        item
+        for item in coverage_manifest()["mappings"]
+        if item["mapping_id"] == "weex.swap.linear.perpetual.v1"
+    )
+    capabilities = mapping["capabilities"]
+    kinds = {item["datapoint"]["kind"] for item in capabilities}
+    notional = next(
+        item
+        for item in capabilities
+        if item["datapoint"]["kind"] == "open_interest.notional"
+        and item["datapoint"]["temporal_mode"] == "current"
+    )
+
+    assert "open_interest.base_quantity" in kinds
+    assert "open_interest.contract_count" not in kinds
+    assert not notional["requirements"]["instrument_metadata"]
+    assert notional["requirements"]["market_observations"] == ["mark_price"]
 
 
 def test_legacy_instrument_projection_is_a_compatibility_seam_into_cdm():
@@ -397,7 +459,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.3.2"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.4.0"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )

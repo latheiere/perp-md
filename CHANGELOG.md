@@ -3,6 +3,17 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.4.0 - 2026-08-31
+
+- Normalize standardized-runtime open-interest amounts according to proven
+  provider-native units, avoiding contract-size scaling for base quantities.
+- Replace optional-runtime funding acquisition with native current and settled
+  history routes where provider semantics prove both products.
+- Keep status-snapshot funding native and current-only rather than presenting
+  snapshots as settlement history.
+- Declare bounded page-number retrieval separately from cursor traversal in
+  acquisition plans.
+
 ## 0.3.2 - 2026-08-28
 
 - Serialize native funding-history page requests with a 200-millisecond

@@ -1,0 +1,18 @@
+{
+  "market_id": "BASEQUOTE",
+  "symbol": "BASE/QUOTE:QUOTE",
+  "current": {
+    "symbol": "BASE/QUOTE:QUOTE",
+    "openInterestAmount": "125.5",
+    "timestamp": 1700000100000
+  },
+  "ticker": {
+    "symbol": "BASE/QUOTE:QUOTE",
+    "mark": "20"
+  },
+  "malformed": {
+    "symbol": "BASE/QUOTE:QUOTE",
+    "openInterestAmount": "invalid",
+    "timestamp": 1700000100000
+  }
+}

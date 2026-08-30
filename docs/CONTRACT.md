@@ -132,6 +132,16 @@ provider runtime omits advertised history support or returns malformed history
 after current OI succeeds, the result preserves current OI and reports a
 structured `HistoryIssue`.
 
+When a standardized provider runtime labels an OI amount generically, the
+adapter follows the provider's native unit evidence rather than assuming every
+amount is a contract count. A proven base-quantity amount is retained as base
+quantity and converted to reporting notional with the current mark; a contract
+multiplier is neither required nor applied. Contract-count amounts continue to
+require the metadata needed by their contract type. This classification is
+accepted only when the provider's standardized amount agrees with a parallel
+native base-volume response across contract families with different catalog
+multipliers; the standardized field name alone is not unit evidence.
+
 ## Capabilities
 
 Capabilities report current and history availability, native history
@@ -187,6 +197,9 @@ assessment. A supported, unambiguous retrieval plan contains `request_scope`,
 lookback bounds remain `None`; protocol schedules are never converted into an
 invented duration. Unsupported operations or supported alternatives that do
 not agree on retrieval shape have `retrieval=None`.
+Pagination distinguishes single-page, page-number, time-cursor, full-download,
+and optional-runtime-defined retrieval so schedulers do not infer one traversal
+shape from another.
 
 The plan deliberately excludes adapter identifiers, route values, optional
 runtime feature identifiers, and request-cost estimates. The library does not

@@ -63,7 +63,7 @@
       "properties": {
         "request_scope": {"enum": ["instrument", "provider_aggregate"]},
         "history_scope": {"enum": ["none", "latest_window", "bounded", "full_retained"]},
-        "pagination": {"enum": ["none", "single_page", "time_cursor", "full_download", "runtime_defined"]}
+        "pagination": {"enum": ["none", "single_page", "page_number", "time_cursor", "full_download", "runtime_defined"]}
       }
     },
     "capability": {

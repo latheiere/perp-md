@@ -573,7 +573,7 @@ def test_optional_runtime_plan_returns_generic_constraints_without_feature_ids()
     assert "ccxt.fetch" not in repr(plan)
 
 
-def test_hybrid_product_mapping_selects_optional_historical_funding_runtime():
+def test_native_product_mapping_selects_bounded_historical_funding_cursor():
     class Adapter:
         def supports(self, subject):
             return True
@@ -581,14 +581,12 @@ def test_hybrid_product_mapping_selects_optional_historical_funding_runtime():
         def capabilities(self, subject):
             return FundingCapabilities(
                 True,
-                (FundingRateKind.INDICATIVE,),
+                (FundingRateKind.NEXT,),
                 True,
             )
 
         async def runtime_features(self, subject):
-            return frozenset(
-                {CCXT_FUNDING_FEATURE, CCXT_FUNDING_HISTORY_FEATURE}
-            )
+            return frozenset()
 
         async def close(self):
             return None
@@ -617,7 +615,7 @@ def test_hybrid_product_mapping_selects_optional_historical_funding_runtime():
 
     assert plan.status is CapabilityStatus.SUPPORTED
     assert plan.retrieval is not None
-    assert plan.retrieval.pagination is PaginationMode.RUNTIME_DEFINED
+    assert plan.retrieval.pagination is PaginationMode.TIME_CURSOR
     assert "ccxt.fetch" not in repr(plan)
 
 

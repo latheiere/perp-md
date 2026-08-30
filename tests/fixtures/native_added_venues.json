@@ -45,7 +45,22 @@
   },
   "xt": {
     "current": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"BASE_QUOTE","openInterest":"4","openInterestUsd":"20","time":1700000100000}},
-    "malformed": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"OTHER","openInterestUsd":"20","time":1700000100000}}
+    "malformed": {"returnCode":0,"msgInfo":"success","error":null,"result":{"symbol":"OTHER","openInterestUsd":"20","time":1700000100000}},
+    "funding_current": {"returnCode":0,"msgInfo":"success","result":{"symbol":"BASE_QUOTE","fundingRate":"0.0001","nextCollectionTime":1700028800000,"collectionInternal":8}},
+    "funding_history_pages": [
+      {"returnCode":0,"msgInfo":"success","result":{"hasPrev":false,"hasNext":true,"items":[{"id":4,"symbol":"BASE_QUOTE","fundingRate":"0.00009","createdTime":1700000000000,"collectionInternal":28800},{"id":3,"symbol":"BASE_QUOTE","fundingRate":"0.00008","createdTime":1699971200000,"collectionInternal":28800}]}},
+      {"returnCode":0,"msgInfo":"success","result":{"hasPrev":true,"hasNext":false,"items":[{"id":2,"symbol":"BASE_QUOTE","fundingRate":"0.00007","createdTime":1699942400000,"collectionInternal":28800}]}}
+    ],
+    "funding_malformed": {"returnCode":0,"msgInfo":"success","result":{"symbol":"OTHER","fundingRate":"0.0001","nextCollectionTime":1700028800000,"collectionInternal":8}}
+  },
+  "mexc_funding": {
+    "current": {"success":true,"code":0,"data":{"symbol":"BASE_QUOTE","fundingRate":"0.0001","nextSettleTime":1700028800000,"collectCycle":8,"timestamp":1700000100000}},
+    "history_pages": [
+      {"success":true,"code":0,"data":{"pageSize":1000,"totalCount":3,"totalPage":2,"currentPage":1,"resultList":[{"symbol":"BASE_QUOTE","fundingRate":"0.00009","settleTime":1700000000000,"collectCycle":8},{"symbol":"BASE_QUOTE","fundingRate":"0.00008","settleTime":1699971200000,"collectCycle":8}]}},
+      {"success":true,"code":0,"data":{"pageSize":1000,"totalCount":3,"totalPage":2,"currentPage":2,"resultList":[{"symbol":"BASE_QUOTE","fundingRate":"0.00007","settleTime":1699942400000,"collectCycle":8}]}}
+    ],
+    "history_empty": {"success":true,"code":0,"data":{"pageSize":1000,"totalCount":0,"totalPage":0,"currentPage":1,"resultList":[]}},
+    "malformed": {"success":true,"code":0,"data":{"symbol":"OTHER","fundingRate":"0.0001","nextSettleTime":1700028800000,"collectCycle":8}}
   },
   "phemex": {
     "linear": {"error":null,"result":{"symbol":"BASEQUOTE","timestamp":"1700000100000000000","markPriceRp":"5","openInterestRv":"4"}},
@@ -74,6 +89,7 @@
     "current": [["tBASEF0:QUOTEF0",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001,null,null,20,null,null,100,null,null,null,0.0005,0.0025]],
     "history": [[1699999800000,null,19,19,null,1,null,1700028800000,0,1,null,0.00008,null,null,19,null,null,90,null,null,null,0.0005,0.0025]],
     "malformed_history": [[1699999800000,null]],
-    "funding_current": [["tBASEF0:QUOTEF0",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001,null,null,20,null,null,100,null,null,null,0.0005,0.0025]]
+    "funding_current": [["tBASEF0:QUOTEF0",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001,null,null,20,null,null,100,null,null,null,0.0005,0.0025]],
+    "funding_malformed": [["tOTHER",1700000100000,null,20,20,null,1,null,1700028800000,0,1,null,0.0001]]
   }
 }

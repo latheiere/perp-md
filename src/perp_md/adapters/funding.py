@@ -23,6 +23,7 @@ from perp_md.funding_values import (
     preserve_observed_intervals,
     unspecified_interval,
 )
+from perp_md.identity import REST_DERIVATIVE_STATUS_INSTRUMENT, adapter_identity
 from perp_md.models import (
     ContractDirection,
     FundingCapabilities,
@@ -47,6 +48,9 @@ HTX_FUNDING_HISTORY_LIMIT = 50
 TOOBIT_FUNDING_HISTORY_LIMIT = 1_000
 GRVT_FUNDING_HISTORY_LIMIT = 1_000
 LIGHTER_FUNDING_HISTORY_LIMIT = 500
+MEXC_FUNDING_HISTORY_LIMIT = 1_000
+XT_FUNDING_HISTORY_LIMIT = 200
+BITFINEX_FUNDING_INTERVAL_SECONDS = 28_800
 HYPERLIQUID_FUNDING_INTERVAL_SECONDS = 3_600
 HYPERLIQUID_FUNDING_INTERVAL_MS = HYPERLIQUID_FUNDING_INTERVAL_SECONDS * 1_000
 KRAKEN_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
@@ -1130,6 +1134,266 @@ class BtseFundingAdapter(NativeFundingAdapter):
             return FundingResult(current, history_issue=self._issue(exc))
 
 
+class MexcFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "MEXC" and instrument.market_type != "future"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(True, (FundingRateKind.NEXT,), True)
+
+    async def fetch(self, instrument, history, *, include_history):
+        payload = await self.transport.get(
+            f"https://contract.mexc.com/api/v1/contract/funding_rate/{instrument.symbol}"
+        )
+        row = _mexc_data(payload, "funding snapshot")
+        if not isinstance(row, dict) or row.get("symbol") != instrument.symbol:
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("nextSettleTime")),
+            row.get("fundingRate"),
+            FundingRateKind.NEXT,
+            TemporalMode.NEXT,
+            _hour_interval(row.get("collectCycle")),
+            retrieved_at_ms=retrieved,
+            source_observation="funding.next_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            points = await self._history(instrument.symbol, history, retrieved)
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self, symbol: str, requested: HistoryRange | None, retrieved_at_ms: int
+    ) -> tuple[FundingObservation, ...]:
+        rows: dict[int, FundingObservation] = {}
+        for page_number in range(1, FUNDING_HISTORY_MAX_PAGES + 1):
+            payload = await self.transport.get(
+                "https://contract.mexc.com/api/v1/contract/funding_rate/history",
+                {
+                    "symbol": symbol,
+                    "page_num": page_number,
+                    "page_size": MEXC_FUNDING_HISTORY_LIMIT,
+                },
+            )
+            page = _mexc_data(payload, "settled funding history")
+            if not isinstance(page, dict) or not isinstance(page.get("resultList"), list):
+                raise InvalidResponse("provider returned an invalid settled funding history")
+            source_rows = page["resultList"]
+            oldest: int | None = None
+            for source in source_rows:
+                if not isinstance(source, dict) or source.get("symbol") != symbol:
+                    raise InvalidResponse(
+                        "provider returned an invalid settled funding history row"
+                    )
+                timestamp = _integer_timestamp_ms(source.get("settleTime"))
+                oldest = timestamp if oldest is None else min(oldest, timestamp)
+                if requested is not None:
+                    if requested.start_ms is not None and timestamp < requested.start_ms:
+                        continue
+                    if requested.end_ms is not None and timestamp > requested.end_ms:
+                        continue
+                point = _relative_observation(
+                    timestamp,
+                    source.get("fundingRate"),
+                    FundingRateKind.SETTLED,
+                    TemporalMode.HISTORICAL,
+                    _hour_interval(source.get("collectCycle")),
+                    retrieved_at_ms=retrieved_at_ms,
+                    source_observation="funding.settled_rate",
+                )
+                existing = rows.get(timestamp)
+                if existing is not None and existing.rate != point.rate:
+                    raise InvalidResponse("provider returned conflicting settled funding rows")
+                rows[timestamp] = point
+            if not source_rows and page.get("totalPage") in (0, "0"):
+                return preserve_observed_intervals(
+                    tuple(rows[key] for key in sorted(rows))
+                )
+            total_pages = _positive_integer(page.get("totalPage"), "history page count")
+            if (
+                requested is None
+                or not source_rows
+                or page_number >= total_pages
+                or (
+                    requested.start_ms is not None
+                    and oldest is not None
+                    and oldest <= requested.start_ms
+                )
+            ):
+                return preserve_observed_intervals(tuple(rows[key] for key in sorted(rows)))
+        raise PaginationError("funding history exceeded the bounded page limit")
+
+
+class XtFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "XT" and instrument.market_type != "future"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.NEXT,),
+            True,
+            required_metadata=("contract_direction",),
+        )
+
+    async def fetch(self, instrument, history, *, include_history):
+        host = self._host(instrument)
+        payload = await self.transport.get(
+            f"{host}/future/market/v1/public/q/funding-rate",
+            {"symbol": instrument.symbol},
+        )
+        row = _xt_result(payload, "funding snapshot")
+        if not isinstance(row, dict) or row.get("symbol") != instrument.symbol:
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        retrieved = int(self.clock() * 1_000)
+        current = _relative_observation(
+            _integer_timestamp_ms(row.get("nextCollectionTime")),
+            row.get("fundingRate"),
+            FundingRateKind.NEXT,
+            TemporalMode.NEXT,
+            _hour_interval(row.get("collectionInternal")),
+            retrieved_at_ms=retrieved,
+            source_observation="funding.next_rate",
+        )
+        if not include_history:
+            return FundingResult(current)
+        try:
+            points = await self._history(host, instrument.symbol, history, retrieved)
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+    @staticmethod
+    def _host(instrument: Instrument) -> str:
+        if instrument.contract_direction is ContractDirection.LINEAR:
+            return "https://fapi.xt.com"
+        if instrument.contract_direction is ContractDirection.INVERSE:
+            return "https://dapi.xt.com"
+        raise InvalidInstrument("contract_direction is required for provider product routing")
+
+    async def _history(
+        self,
+        host: str,
+        symbol: str,
+        requested: HistoryRange | None,
+        retrieved_at_ms: int,
+    ) -> tuple[FundingObservation, ...]:
+        rows: dict[int, FundingObservation] = {}
+        cursor: Any = None
+        for _ in range(FUNDING_HISTORY_MAX_PAGES):
+            params: dict[str, Any] = {"symbol": symbol, "limit": XT_FUNDING_HISTORY_LIMIT}
+            if cursor is not None:
+                params.update(direction="NEXT", id=cursor)
+            payload = await self.transport.get(
+                f"{host}/future/market/v1/public/q/funding-rate-record", params
+            )
+            page = _xt_result(payload, "settled funding history")
+            if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                raise InvalidResponse("provider returned an invalid settled funding history")
+            source_rows = page["items"]
+            next_cursor: Any = None
+            oldest: int | None = None
+            for source in source_rows:
+                if (
+                    not isinstance(source, dict)
+                    or source.get("symbol") != symbol
+                    or source.get("id") in (None, "")
+                ):
+                    raise InvalidResponse(
+                        "provider returned an invalid settled funding history row"
+                    )
+                timestamp = _integer_timestamp_ms(source.get("createdTime"))
+                if oldest is None or timestamp < oldest:
+                    oldest = timestamp
+                    next_cursor = source["id"]
+                if requested is not None:
+                    if requested.start_ms is not None and timestamp < requested.start_ms:
+                        continue
+                    if requested.end_ms is not None and timestamp > requested.end_ms:
+                        continue
+                point = _relative_observation(
+                    timestamp,
+                    source.get("fundingRate"),
+                    FundingRateKind.SETTLED,
+                    TemporalMode.HISTORICAL,
+                    _seconds_interval(source.get("collectionInternal")),
+                    retrieved_at_ms=retrieved_at_ms,
+                    source_observation="funding.settled_rate",
+                )
+                existing = rows.get(timestamp)
+                if existing is not None and existing.rate != point.rate:
+                    raise InvalidResponse("provider returned conflicting settled funding rows")
+                rows[timestamp] = point
+            if (
+                requested is None
+                or not source_rows
+                or not page.get("hasNext")
+                or (
+                    requested.start_ms is not None
+                    and oldest is not None
+                    and oldest <= requested.start_ms
+                )
+            ):
+                return preserve_observed_intervals(tuple(rows[key] for key in sorted(rows)))
+            if next_cursor is None or next_cursor == cursor:
+                raise PaginationError("funding history pagination did not advance")
+            cursor = next_cursor
+        raise PaginationError("funding history exceeded the bounded page limit")
+
+
+class BitfinexFundingAdapter(NativeFundingAdapter):
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "BITFINEX" and instrument.market_type != "future"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.INDICATIVE,),
+            False,
+            declared_interval=explicit_interval(BITFINEX_FUNDING_INTERVAL_SECONDS),
+        )
+
+    async def fetch(self, instrument, history, *, include_history):
+        legacy_symbol = (
+            instrument.pair_symbol or f"t{instrument.symbol}"
+            if isinstance(instrument, Instrument)
+            else None
+        )
+        endpoint_symbol = adapter_identity(
+            instrument,
+            REST_DERIVATIVE_STATUS_INSTRUMENT,
+            legacy_value=legacy_symbol,
+        )
+        payload = await self.transport.get(
+            "https://api-pub.bitfinex.com/v2/status/deriv", {"keys": endpoint_symbol}
+        )
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 1
+            or not isinstance(payload[0], list)
+            or len(payload[0]) <= 12
+            or payload[0][0] != endpoint_symbol
+            or payload[0][1] is None
+            or payload[0][12] is None
+        ):
+            raise InvalidResponse("provider returned an invalid funding snapshot")
+        row = payload[0]
+        current = _relative_observation(
+            _integer_timestamp_ms(row[1]),
+            row[12],
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            explicit_interval(BITFINEX_FUNDING_INTERVAL_SECONDS),
+            retrieved_at_ms=int(self.clock() * 1_000),
+            source_observation="funding.indicative_rate",
+        )
+        return FundingResult(current)
+
+
 def native_funding_adapters(
     transport: JsonTransport,
 ) -> dict[str, NativeFundingAdapter]:
@@ -1147,6 +1411,9 @@ def native_funding_adapters(
         LighterFundingAdapter(transport),
         GrvtFundingAdapter(transport),
         BtseFundingAdapter(transport),
+        MexcFundingAdapter(transport),
+        XtFundingAdapter(transport),
+        BitfinexFundingAdapter(transport),
     ]
     return {
         venue: adapter
@@ -1165,8 +1432,34 @@ def native_funding_adapters(
             LighterFundingAdapter: ("LIGHTER",),
             GrvtFundingAdapter: ("GRVT",),
             BtseFundingAdapter: ("BTSE",),
+            MexcFundingAdapter: ("MEXC",),
+            XtFundingAdapter: ("XT",),
+            BitfinexFundingAdapter: ("BITFINEX",),
         }[type(adapter)]
     }
+
+
+def _mexc_data(payload: Any, description: str) -> Any:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or str(payload.get("code")) != "0"
+    ):
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload.get("data")
+
+
+def _xt_result(payload: Any, description: str) -> Any:
+    if not isinstance(payload, dict) or str(payload.get("returnCode")) != "0":
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return payload.get("result")
+
+
+def _positive_integer(value: Any, description: str) -> int:
+    parsed = number(value)
+    if not parsed.is_integer() or parsed <= 0:
+        raise InvalidResponse(f"provider returned an invalid {description}")
+    return int(parsed)
 
 
 def _relative_observation(

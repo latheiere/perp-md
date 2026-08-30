@@ -65,6 +65,7 @@ DEFAULT_EXCHANGE_IDS = {
 HTX_HISTORY_INTERVAL_SECONDS = 3_600
 HTX_HISTORY_LIMIT = 200
 HTX_MAX_HISTORY_DAYS = 8
+BASE_QUANTITY_OPEN_INTEREST_PROVIDERS = frozenset({"WEEX"})
 
 
 @dataclass
@@ -141,13 +142,22 @@ class CcxtAdapter:
                 raise DataUnavailable("open interest is not available for this venue")
             payload = await exchange.fetch_open_interest(symbol)
             native = payload.get("openInterestAmount")
+            native_unit = (
+                NativeUnit.BASE
+                if instrument.venue in BASE_QUANTITY_OPEN_INTEREST_PROVIDERS
+                else NativeUnit.CONTRACTS
+            )
             mark: float | None = None
             if payload.get("openInterestValue") is not None:
                 value = number(payload["openInterestValue"])
                 valuation = ValuationMethod.VENUE_REPORTED
             elif native is not None:
                 mark = self._mark(await exchange.fetch_ticker(symbol))
-                value = contract_value_usd(instrument, number(native), mark)
+                value = (
+                    number(native) * mark
+                    if native_unit is NativeUnit.BASE
+                    else contract_value_usd(instrument, number(native), mark)
+                )
                 valuation = ValuationMethod.MARK_PRICE
             else:
                 raise DataUnavailable(
@@ -157,13 +167,13 @@ class CcxtAdapter:
                 int(payload.get("timestamp") or time.time() * 1000),
                 value,
                 number(native) if native is not None else None,
-                NativeUnit.CONTRACTS if native is not None else None,
+                native_unit if native is not None else None,
                 mark,
                 valuation,
                 proven_base_quantity(
                     instrument,
                     number(native),
-                    NativeUnit.CONTRACTS,
+                    native_unit,
                 )
                 if native is not None
                 else None,
