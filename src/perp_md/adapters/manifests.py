@@ -1576,7 +1576,8 @@ def _optional_mapping(
         if provider == "COINBASE"
         else _CCXT_RUNTIME
     )
-    amount_is_base = provider == "WEEX"
+    open_interest_usable = provider != "WEEX"
+    amount_is_base = False
     base = (
         (
             _native_base(prefix, TemporalMode.CURRENT, RUNTIME_CURRENT, identity=oi_identity)
@@ -1585,15 +1586,15 @@ def _optional_mapping(
                 prefix, TemporalMode.CURRENT, RUNTIME_CURRENT, identity=oi_identity
             ),
         )
-        if direction == "linear" and provider != "BINGX"
+        if open_interest_usable and direction == "linear" and provider != "BINGX"
         else ()
     )
     runtime_limit = (
         "availability and history shape are determined by the installed optional provider runtime",
     )
-    amount_only = provider in {"BTSE", "WEEX"}
+    amount_only = provider == "BTSE"
     value_only = provider == "BINGX"
-    current_count = () if value_only or amount_is_base else (
+    current_count = () if not open_interest_usable or value_only or amount_is_base else (
         _capability(
             f"{prefix}.open-interest.contract-count.current",
             DataPointKind.OPEN_INTEREST_CONTRACT_COUNT,
@@ -1606,7 +1607,7 @@ def _optional_mapping(
             limitations=runtime_limit,
         ),
     )
-    current_notional = _capability(
+    current_notional = (_capability(
         f"{prefix}.open-interest.notional.current",
         DataPointKind.OPEN_INTEREST_NOTIONAL,
         TemporalMode.CURRENT,
@@ -1628,7 +1629,7 @@ def _optional_mapping(
         observations=("mark_price",) if amount_only else (),
         runtime=oi_runtime,
         limitations=runtime_limit,
-    )
+    ),) if open_interest_usable else ()
     return _mapping(
         provider,
         "optional.ccxt",
@@ -1655,7 +1656,7 @@ def _optional_mapping(
                 )
                 for item in base
             ),
-            current_notional,
+            *current_notional,
             *(
                 (
                     _capability(
@@ -1670,7 +1671,9 @@ def _optional_mapping(
                         limitations=runtime_limit,
                     ),
                 )
-                if provider != "COINBASE" and instrument_kind is InstrumentKind.PERPETUAL_SWAP
+                if open_interest_usable
+                and provider != "COINBASE"
+                and instrument_kind is InstrumentKind.PERPETUAL_SWAP
                 else ()
             ),
             *(

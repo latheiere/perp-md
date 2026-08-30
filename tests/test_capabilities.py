@@ -411,7 +411,7 @@ def test_native_funding_manifests_declare_only_proven_temporal_products(
     )
 
 
-def test_standardized_base_amount_manifest_does_not_require_contract_metadata():
+def test_ambiguous_standardized_amount_manifest_excludes_open_interest():
     mapping = next(
         item
         for item in coverage_manifest()["mappings"]
@@ -419,17 +419,14 @@ def test_standardized_base_amount_manifest_does_not_require_contract_metadata():
     )
     capabilities = mapping["capabilities"]
     kinds = {item["datapoint"]["kind"] for item in capabilities}
-    notional = next(
-        item
-        for item in capabilities
-        if item["datapoint"]["kind"] == "open_interest.notional"
-        and item["datapoint"]["temporal_mode"] == "current"
-    )
-
-    assert "open_interest.base_quantity" in kinds
-    assert "open_interest.contract_count" not in kinds
-    assert not notional["requirements"]["instrument_metadata"]
-    assert notional["requirements"]["market_observations"] == ["mark_price"]
+    assert not {kind for kind in kinds if kind.startswith("open_interest.")}
+    assert {
+        kind for kind in kinds if kind.startswith("funding.")
+    } == {
+        "funding.indicative_rate",
+        "funding.settled_rate",
+        "funding.interval",
+    }
 
 
 def test_legacy_instrument_projection_is_a_compatibility_seam_into_cdm():
@@ -459,7 +456,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.4.0"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.4.1"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )

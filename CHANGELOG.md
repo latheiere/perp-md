@@ -3,6 +3,12 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.4.1 - 2026-08-31
+
+- Exclude open-interest acquisition when a provider exposes matching numeric
+  amounts through conflicting unit descriptions, while retaining independently
+  proven funding capabilities.
+
 ## 0.4.0 - 2026-08-31
 
 - Normalize standardized-runtime open-interest amounts according to proven

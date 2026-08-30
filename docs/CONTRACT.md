@@ -133,14 +133,13 @@ after current OI succeeds, the result preserves current OI and reports a
 structured `HistoryIssue`.
 
 When a standardized provider runtime labels an OI amount generically, the
-adapter follows the provider's native unit evidence rather than assuming every
-amount is a contract count. A proven base-quantity amount is retained as base
-quantity and converted to reporting notional with the current mark; a contract
-multiplier is neither required nor applied. Contract-count amounts continue to
-require the metadata needed by their contract type. This classification is
-accepted only when the provider's standardized amount agrees with a parallel
-native base-volume response across contract families with different catalog
-multipliers; the standardized field name alone is not unit evidence.
+adapter requires provider evidence that proves its measurement unit rather than
+assuming contract count or base quantity. Matching numeric values across routes
+with conflicting dimensional descriptions do not resolve the ambiguity, and a
+separately published contract multiplier does not justify either multiplying or
+ignoring it. The affected OI capability remains unavailable while independently
+proven funding capabilities remain usable. Proven contract-count and
+base-quantity amounts continue to use their respective metadata requirements.
 
 ## Capabilities
 
