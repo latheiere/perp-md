@@ -456,7 +456,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.4.1"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.5.0"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )

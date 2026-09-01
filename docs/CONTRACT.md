@@ -78,6 +78,16 @@ normalized notional alone does not prove a base quantity. Contract-count
 conversion requires a positive base-denominated multiplier. Consumers must not
 repeat adapter-specific unit assumptions when this typed field is absent.
 
+When a provider publishes current OI in different dimensions across linear and
+inverse product families, the native adapter preserves each field in its
+observed dimension and performs only the mark-price conversion needed for the
+other measure. For BingX linear perpetuals, `openInterest` is retained as quote
+notional and canonical base quantity is derived at the paired native mark. For
+BingX inverse perpetuals, `openInterest` is retained as canonical base quantity
+and reporting notional is derived at the paired native mark. These current OI
+paths do not claim historical OI retrieval. Linear settled funding history is a
+bounded single-page capability; inverse funding remains current-only.
+
 Zero is a valid observation. Absence, unsupported capabilities, malformed
 payloads, and transport failures are errors and are never converted to zero.
 All numeric values must be finite.

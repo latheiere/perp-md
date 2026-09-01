@@ -16,8 +16,11 @@
   normalized USD notional.
 - `transport` implements bounded asynchronous JSON requests, per-host
   concurrency, connection pooling, and short-lived request deduplication.
-- `adapters.native` contains native endpoint selection, payload parsing,
-  current OI normalization, and historical pagination.
+- `adapters.native` is a package whose per-venue modules contain native endpoint
+  selection, payload parsing, current OI normalization, and historical
+  pagination. Its package initializer preserves the adapter registry and
+  compatibility imports; shared validation and observation builders remain in
+  the private `_common` module.
 - `adapters.funding` contains native funding acquisition, relative-rate
   normalization, temporal semantics, evidence capture, and bounded history.
 - `adapters.ccxt` contains the optional CCXT exchange lifecycle, symbol

@@ -1,0 +1,82 @@
+{
+  "open_interest_linear": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "openInterest": "308.5",
+      "symbol": "BASE-QUOTE",
+      "time": 1788220800000
+    }
+  },
+  "premium_linear": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "symbol": "BASE-QUOTE",
+      "markPrice": "2.5",
+      "indexPrice": "2.49",
+      "lastFundingRate": "0.0001",
+      "nextFundingTime": 1788249600000,
+      "fundingIntervalHours": 8,
+      "updateTime": 1788220800000
+    }
+  },
+  "open_interest_inverse": {
+    "code": 0,
+    "msg": "",
+    "timestamp": 1788220800100,
+    "data": [
+      {
+        "symbol": "OTHER-USD",
+        "openInterest": "12.5",
+        "timestamp": 1788220800000
+      }
+    ]
+  },
+  "premium_inverse": {
+    "code": 0,
+    "msg": "",
+    "timestamp": 1788220800100,
+    "data": [
+      {
+        "symbol": "OTHER-USD",
+        "lastFundingRate": "-0.0002",
+        "markPrice": "50",
+        "indexPrice": "50.1",
+        "nextFundingTime": 1788249600000
+      }
+    ]
+  },
+  "funding_history": {
+    "code": 0,
+    "msg": "",
+    "data": [
+      {
+        "symbol": "BASE-QUOTE",
+        "fundingRate": "0.0002",
+        "fundingTime": 1788220800000,
+        "markPrice": "2.5"
+      },
+      {
+        "symbol": "BASE-QUOTE",
+        "fundingRate": "0.0003",
+        "fundingTime": 1788249600000,
+        "markPrice": "2.6"
+      }
+    ]
+  },
+  "mismatched": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "symbol": "MISMATCH-QUOTE",
+      "openInterest": "1",
+      "time": 1788220800000
+    }
+  },
+  "malformed_history": {
+    "code": 0,
+    "msg": "",
+    "data": "invalid"
+  }
+}

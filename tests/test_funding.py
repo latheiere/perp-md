@@ -22,6 +22,7 @@ from perp_md.adapters.ccxt_funding import CcxtFundingAdapter
 from perp_md.adapters.funding import (
     BitfinexFundingAdapter,
     BinanceFundingAdapter,
+    BingxFundingAdapter,
     BybitFundingAdapter,
     DeepcoinFundingAdapter,
     GateFundingAdapter,
@@ -45,6 +46,67 @@ FIXTURE = json.loads(
 ADDED_VENUES = json.loads(
     (Path(__file__).parent / "fixtures" / "native_added_venues.json").read_text()
 )
+BINGX = json.loads(
+    (Path(__file__).parent / "fixtures" / "native_bingx.json").read_text()
+)
+
+
+def test_native_funding_preserves_current_and_bounded_settled_history():
+    async def handler(method, url, params):
+        return (
+            BINGX["funding_history"]
+            if url.endswith("/fundingRate")
+            else BINGX["premium_linear"]
+        )
+
+    adapter = BingxFundingAdapter(
+        StubTransport(handler), request_interval_seconds=0
+    )
+    result = asyncio.run(
+        adapter.fetch(
+            instrument(
+                "BINGX",
+                symbol="BASE-QUOTE",
+                contract_direction=ContractDirection.LINEAR,
+            ),
+            HistoryRange(1788220800000, 1788249600000),
+            include_history=True,
+        )
+    )
+
+    assert result.current.kind is FundingRateKind.INDICATIVE
+    assert result.current.rate == 0.0001
+    assert result.current.interval.duration_seconds == 28_800
+    assert [point.rate for point in result.history] == [0.0002, 0.0003]
+    assert result.history[1].interval.duration_seconds == 28_800
+    assert result.history_issue is None
+
+
+def test_native_malformed_funding_history_preserves_valid_current():
+    async def handler(method, url, params):
+        return (
+            BINGX["malformed_history"]
+            if url.endswith("/fundingRate")
+            else BINGX["premium_linear"]
+        )
+
+    result = asyncio.run(
+        BingxFundingAdapter(
+            StubTransport(handler), request_interval_seconds=0
+        ).fetch(
+            instrument(
+                "BINGX",
+                symbol="BASE-QUOTE",
+                contract_direction=ContractDirection.LINEAR,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.rate == 0.0001
+    assert result.history == ()
+    assert result.history_issue is not None
 
 
 class StubTransport:
@@ -880,6 +942,7 @@ def test_proven_native_funding_routes_are_registered_without_optional_runtime():
     adapters = native_funding_adapters(StubTransport(None))
 
     assert isinstance(adapters["MEXC"], MexcFundingAdapter)
+    assert isinstance(adapters["BINGX"], BingxFundingAdapter)
     assert isinstance(adapters["XT"], XtFundingAdapter)
     assert isinstance(adapters["BITFINEX"], BitfinexFundingAdapter)
 
@@ -1109,7 +1172,7 @@ def test_concurrent_funding_history_requests_do_not_overlap_or_bunch():
         adapter = DeepcoinFundingAdapter(
             StubTransport(handler), lambda: 1_700_000_100
         )
-        adapter._history_pacer = funding_module._RequestStartPacer(
+        adapter._history_pacer = funding_module.RequestPacer(
             funding_module.DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS,
             clock=fake_time.clock,
             sleep=fake_time.sleep,
@@ -1165,7 +1228,7 @@ def test_paced_funding_history_pagination_preserves_every_page(monkeypatch):
         adapter = DeepcoinFundingAdapter(
             StubTransport(handler), lambda: 1_700_000_100
         )
-        adapter._history_pacer = funding_module._RequestStartPacer(
+        adapter._history_pacer = funding_module.RequestPacer(
             funding_module.DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS,
             clock=fake_time.clock,
             sleep=fake_time.sleep,

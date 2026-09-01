@@ -921,6 +921,28 @@ def _native_current_family(
             ),
         )
         notional_instrument: tuple[str, ...] = ()
+        notional_converted = True
+        notional_observations = ("mark_price",)
+    elif native_unit == "quote":
+        quantity = (
+            _capability(
+                f"{prefix}.open-interest.base-quantity.current",
+                DataPointKind.OPEN_INTEREST_BASE_QUANTITY,
+                TemporalMode.CURRENT,
+                oi_source,
+                CURRENT,
+                methods=(
+                    (
+                        DerivationKind.PROVIDER_FORMULA,
+                        "perp_md.open_interest.reporting_notional_to_base_at_mark.v1",
+                    ),
+                ),
+                observations=("mark_price",),
+            ),
+        )
+        notional_instrument = ()
+        notional_converted = False
+        notional_observations = ()
     else:
         quantity = (
             _capability(
@@ -943,6 +965,8 @@ def _native_current_family(
             ),
         )
         notional_instrument = _CONTRACT_VALUE
+        notional_converted = direction == "linear"
+        notional_observations = ("mark_price",) if direction == "linear" else ()
     funding = ()
     if funding_kind is not None:
         temporal = (
@@ -995,11 +1019,9 @@ def _native_current_family(
                 TemporalMode.CURRENT,
                 CURRENT,
                 source=oi_source,
-                converted=native_unit == "base" or direction == "linear",
+                converted=notional_converted,
                 instrument=notional_instrument,
-                observations=("mark_price",)
-                if native_unit == "base" or direction == "linear"
-                else (),
+                observations=notional_observations,
             ),
             *funding,
         ),
@@ -1586,15 +1608,14 @@ def _optional_mapping(
                 prefix, TemporalMode.CURRENT, RUNTIME_CURRENT, identity=oi_identity
             ),
         )
-        if open_interest_usable and direction == "linear" and provider != "BINGX"
+        if open_interest_usable and direction == "linear"
         else ()
     )
     runtime_limit = (
         "availability and history shape are determined by the installed optional provider runtime",
     )
     amount_only = provider == "BTSE"
-    value_only = provider == "BINGX"
-    current_count = () if not open_interest_usable or value_only or amount_is_base else (
+    current_count = () if not open_interest_usable or amount_is_base else (
         _capability(
             f"{prefix}.open-interest.contract-count.current",
             DataPointKind.OPEN_INTEREST_CONTRACT_COUNT,
@@ -1770,8 +1791,6 @@ def _ccxt_funding_mapping(
 
 
 _OPTIONAL_PRODUCT_FAMILIES = (
-    ("BINGX", "linear", "swap", "SWAP"),
-    ("BINGX", "inverse", "swap", "SWAP"),
     ("BITGET", "linear", "usdt-m", "USDT-M"),
     ("BITGET", "linear", "usdc-m", "USDC-M"),
     ("BITGET", "inverse", "coin-m", "COIN-M"),
@@ -1805,6 +1824,32 @@ BUILTIN_ADAPTER_MANIFESTS = (
             _binance("inverse"),
             _binance_future("linear"),
             _binance_future("inverse"),
+        ),
+    ),
+    _manifest(
+        "BINGX",
+        (
+            _native_current_family(
+                "BINGX",
+                "swap",
+                "SWAP",
+                "linear",
+                adapter_id="native.bingx",
+                oi_source="openInterest",
+                native_unit="quote",
+                funding_kind=DataPointKind.FUNDING_INDICATIVE_RATE,
+                funding_history=BOUNDED_SINGLE_PAGE,
+            ),
+            _native_current_family(
+                "BINGX",
+                "swap",
+                "SWAP",
+                "inverse",
+                adapter_id="native.bingx",
+                oi_source="openInterest",
+                native_unit="base",
+                funding_kind=DataPointKind.FUNDING_INDICATIVE_RATE,
+            ),
         ),
     ),
     _manifest(

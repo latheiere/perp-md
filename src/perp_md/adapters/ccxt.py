@@ -48,7 +48,6 @@ DEFAULT_EXCHANGE_IDS = {
     "BITFINEX": "bitfinex",
     "BITGET": "bitget",
     "BITMART": "bitmart",
-    "BINGX": "bingx",
     "BLOFIN": "blofin",
     "COINBASE": "coinbaseinternational",
     "DERIBIT": "deribit",
