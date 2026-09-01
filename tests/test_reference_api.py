@@ -552,13 +552,13 @@ def test_optional_runtime_plan_returns_generic_constraints_without_feature_ids()
         ),
     )
     client = OpenInterestClient(
-        adapters={"WEEX": Adapter()},
+        adapters={"BITMART": Adapter()},
         transport=StubTransport(),
     )
 
     plan = asyncio.run(
         client.plan_reference(
-            "WEEX",
+            "BITMART",
             subject,
             datapoint=DataPointKind.OPEN_INTEREST_NOTIONAL,
             temporal_mode=TemporalMode.HISTORICAL,

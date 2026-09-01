@@ -78,6 +78,16 @@ normalized notional alone does not prove a base quantity. Contract-count
 conversion requires a positive base-denominated multiplier. Consumers must not
 repeat adapter-specific unit assumptions when this typed field is absent.
 
+When a provider publishes current OI in different dimensions across linear and
+inverse product families, the native adapter preserves each field in its
+observed dimension and performs only the mark-price conversion needed for the
+other measure. For BingX linear perpetuals, `openInterest` is retained as quote
+notional and canonical base quantity is derived at the paired native mark. For
+BingX inverse perpetuals, `openInterest` is retained as canonical base quantity
+and reporting notional is derived at the paired native mark. These current OI
+paths do not claim historical OI retrieval. Linear settled funding history is a
+bounded single-page capability; inverse funding remains current-only.
+
 Zero is a valid observation. Absence, unsupported capabilities, malformed
 payloads, and transport failures are errors and are never converted to zero.
 All numeric values must be finite.
@@ -133,14 +143,13 @@ after current OI succeeds, the result preserves current OI and reports a
 structured `HistoryIssue`.
 
 When a standardized provider runtime labels an OI amount generically, the
-adapter follows the provider's native unit evidence rather than assuming every
-amount is a contract count. A proven base-quantity amount is retained as base
-quantity and converted to reporting notional with the current mark; a contract
-multiplier is neither required nor applied. Contract-count amounts continue to
-require the metadata needed by their contract type. This classification is
-accepted only when the provider's standardized amount agrees with a parallel
-native base-volume response across contract families with different catalog
-multipliers; the standardized field name alone is not unit evidence.
+adapter requires provider evidence that proves its measurement unit rather than
+assuming contract count or base quantity. Matching numeric values across routes
+with conflicting dimensional descriptions do not resolve the ambiguity, and a
+separately published contract multiplier does not justify either multiplying or
+ignoring it. The affected OI capability remains unavailable while independently
+proven funding capabilities remain usable. Proven contract-count and
+base-quantity amounts continue to use their respective metadata requirements.
 
 ## Capabilities
 

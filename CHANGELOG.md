@@ -3,6 +3,25 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.0 - 2026-09-01
+
+- Add native catalog-aligned open-interest and funding acquisition for a
+  derivative venue whose linear and inverse products publish different native
+  OI dimensions.
+- Preserve linear reporting notional and derive canonical base quantity at the
+  paired mark, while converting inverse base quantity to reporting notional at
+  its paired mark.
+- Replace optional-runtime routing for that venue with validated native current
+  OI, current funding, and bounded settled funding history.
+- Split native open-interest adapters into per-venue modules behind the stable
+  `perp_md.adapters.native` import boundary.
+
+## 0.4.1 - 2026-08-31
+
+- Exclude open-interest acquisition when a provider exposes matching numeric
+  amounts through conflicting unit descriptions, while retaining independently
+  proven funding capabilities.
+
 ## 0.4.0 - 2026-08-31
 
 - Normalize standardized-runtime open-interest amounts according to proven

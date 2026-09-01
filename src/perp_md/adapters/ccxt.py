@@ -48,7 +48,6 @@ DEFAULT_EXCHANGE_IDS = {
     "BITFINEX": "bitfinex",
     "BITGET": "bitget",
     "BITMART": "bitmart",
-    "BINGX": "bingx",
     "BLOFIN": "blofin",
     "COINBASE": "coinbaseinternational",
     "DERIBIT": "deribit",
@@ -65,7 +64,7 @@ DEFAULT_EXCHANGE_IDS = {
 HTX_HISTORY_INTERVAL_SECONDS = 3_600
 HTX_HISTORY_LIMIT = 200
 HTX_MAX_HISTORY_DAYS = 8
-BASE_QUANTITY_OPEN_INTEREST_PROVIDERS = frozenset({"WEEX"})
+UNUSABLE_OPEN_INTEREST_PROVIDERS = frozenset({"WEEX"})
 
 
 @dataclass
@@ -81,7 +80,7 @@ class CcxtAdapter:
         return instrument.venue in self.exchange_ids
 
     def capabilities(self, instrument: Instrument) -> OpenInterestCapabilities:
-        if instrument.venue == "WHITEBIT":
+        if instrument.venue == "WHITEBIT" or instrument.venue in UNUSABLE_OPEN_INTEREST_PROVIDERS:
             return OpenInterestCapabilities(False, False)
         required = (
             ("contract_direction", "contract_multiplier")
@@ -142,11 +141,7 @@ class CcxtAdapter:
                 raise DataUnavailable("open interest is not available for this venue")
             payload = await exchange.fetch_open_interest(symbol)
             native = payload.get("openInterestAmount")
-            native_unit = (
-                NativeUnit.BASE
-                if instrument.venue in BASE_QUANTITY_OPEN_INTEREST_PROVIDERS
-                else NativeUnit.CONTRACTS
-            )
+            native_unit = NativeUnit.CONTRACTS
             mark: float | None = None
             if payload.get("openInterestValue") is not None:
                 value = number(payload["openInterestValue"])

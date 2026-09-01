@@ -10,6 +10,7 @@ from typing import Any
 from cdm import FundingIntervalKind, FundingIntervalV1, FundingRateKind, TemporalMode
 
 from perp_md.adapters.native import HyperliquidAdapter
+from perp_md.adapters.native._common import BINGX_API_URL, _bingx_row
 from perp_md.errors import (
     DataUnavailable,
     InvalidInstrument,
@@ -34,6 +35,7 @@ from perp_md.models import (
     Instrument,
 )
 from perp_md.normalization import number
+from perp_md.pacing import RequestPacer
 from perp_md.transport import JsonTransport
 
 FUNDING_HISTORY_MAX_PAGES = 200
@@ -50,6 +52,7 @@ GRVT_FUNDING_HISTORY_LIMIT = 1_000
 LIGHTER_FUNDING_HISTORY_LIMIT = 500
 MEXC_FUNDING_HISTORY_LIMIT = 1_000
 XT_FUNDING_HISTORY_LIMIT = 200
+BINGX_FUNDING_HISTORY_LIMIT = 1_000
 BITFINEX_FUNDING_INTERVAL_SECONDS = 28_800
 HYPERLIQUID_FUNDING_INTERVAL_SECONDS = 3_600
 HYPERLIQUID_FUNDING_INTERVAL_MS = HYPERLIQUID_FUNDING_INTERVAL_SECONDS * 1_000
@@ -73,27 +76,6 @@ class NativeFundingAdapter:
         detail = str(exc).strip()
         message = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
         return HistoryIssue("history_unavailable", message)
-
-
-@dataclass
-class _RequestStartPacer:
-    interval_seconds: float
-    clock: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _last_completion: float | None = field(default=None, init=False, repr=False)
-
-    async def request(self, operation: Callable[[], Awaitable[Any]]) -> Any:
-        async with self._lock:
-            now = self.clock()
-            if self._last_completion is not None:
-                remaining = self.interval_seconds - (now - self._last_completion)
-                if remaining > 0:
-                    await self.sleep(remaining)
-            try:
-                return await operation()
-            finally:
-                self._last_completion = self.clock()
 
 
 class BinanceFundingAdapter(NativeFundingAdapter):
@@ -635,7 +617,7 @@ class DeepcoinFundingAdapter(NativeFundingAdapter):
         clock: Callable[[], float] = time.time,
     ) -> None:
         super().__init__(transport, clock)
-        self._history_pacer = _RequestStartPacer(
+        self._history_pacer = RequestPacer(
             DEEPCOIN_FUNDING_HISTORY_REQUEST_INTERVAL_SECONDS
         )
 
@@ -1134,6 +1116,118 @@ class BtseFundingAdapter(NativeFundingAdapter):
             return FundingResult(current, history_issue=self._issue(exc))
 
 
+@dataclass
+class BingxFundingAdapter(NativeFundingAdapter):
+    request_interval_seconds: float = 1.0
+    request_clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    _request_pacer: RequestPacer = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._request_pacer = RequestPacer(
+            self.request_interval_seconds,
+            clock=self.request_clock,
+            sleep=self.sleep,
+        )
+
+    def supports(self, instrument: Instrument) -> bool:
+        return instrument.venue == "BINGX"
+
+    def capabilities(self, instrument: Instrument) -> FundingCapabilities:
+        direction = _direction_category(instrument)
+        return FundingCapabilities(
+            True,
+            (FundingRateKind.INDICATIVE,),
+            direction == "linear",
+            required_metadata=("contract_direction",),
+        )
+
+    async def fetch(self, instrument, history, *, include_history):
+        direction = _direction_category(instrument)
+        retrieved_at_ms = int(self.clock() * 1_000)
+        if direction == "linear":
+            url = f"{BINGX_API_URL}/swap/v2/quote/premiumIndex"
+            params = {"symbol": instrument.symbol}
+        else:
+            url = f"{BINGX_API_URL}/cswap/v1/market/premiumIndex"
+            params = {"symbol": instrument.symbol, "timestamp": retrieved_at_ms}
+        payload = await self._request_pacer.request(
+            lambda: self.transport.get(url, params)
+        )
+        row = _bingx_row(payload, instrument.symbol, "funding snapshot")
+        raw_time = (
+            row.get("time")
+            or row.get("updateTime")
+            or payload.get("timestamp")
+        )
+        source_time_ms = (
+            _integer_timestamp_ms(raw_time) if raw_time not in (None, "") else None
+        )
+        interval = (
+            _hour_interval(row.get("fundingIntervalHours"))
+            if row.get("fundingIntervalHours") not in (None, "")
+            else unspecified_interval()
+        )
+        current = _relative_observation(
+            source_time_ms,
+            row.get("lastFundingRate"),
+            FundingRateKind.INDICATIVE,
+            TemporalMode.CURRENT,
+            interval,
+            retrieved_at_ms=retrieved_at_ms,
+            source_observation="funding.indicative_rate",
+        )
+        if not include_history or direction == "inverse":
+            return FundingResult(current)
+        try:
+            points = await self._history(
+                instrument.symbol, history, retrieved_at_ms
+            )
+            return FundingResult(current, points)
+        except Exception as exc:
+            return FundingResult(current, history_issue=self._issue(exc))
+
+    async def _history(
+        self,
+        symbol: str,
+        requested: HistoryRange | None,
+        retrieved_at_ms: int,
+    ) -> tuple[FundingObservation, ...]:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "limit": BINGX_FUNDING_HISTORY_LIMIT,
+        }
+        if requested is not None and requested.start_ms is not None:
+            params["startTime"] = requested.start_ms
+        if requested is not None and requested.end_ms is not None:
+            params["endTime"] = requested.end_ms
+        payload = await self._request_pacer.request(
+            lambda: self.transport.get(
+                f"{BINGX_API_URL}/swap/v2/quote/fundingRate",
+                params,
+            )
+        )
+        if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+            raise InvalidResponse("provider returned an invalid settled funding history")
+        source_rows = payload.get("data")
+        if not isinstance(source_rows, list):
+            raise InvalidResponse("provider returned an invalid settled funding history")
+        if any(
+            not isinstance(row, dict) or row.get("symbol") != symbol
+            for row in source_rows
+        ):
+            raise InvalidResponse(
+                "provider returned an invalid settled funding history row"
+            )
+        return _relative_history(
+            source_rows,
+            "fundingTime",
+            "fundingRate",
+            requested,
+            retrieved_at_ms=retrieved_at_ms,
+        )
+
+
 class MexcFundingAdapter(NativeFundingAdapter):
     def supports(self, instrument: Instrument) -> bool:
         return instrument.venue == "MEXC" and instrument.market_type != "future"
@@ -1397,46 +1491,33 @@ class BitfinexFundingAdapter(NativeFundingAdapter):
 def native_funding_adapters(
     transport: JsonTransport,
 ) -> dict[str, NativeFundingAdapter]:
-    adapters: list[NativeFundingAdapter] = [
-        BinanceFundingAdapter(transport),
-        BybitFundingAdapter(transport),
-        GateFundingAdapter(transport),
-        OkxFundingAdapter(transport),
-        HyperliquidFundingAdapter(transport),
-        KrakenFundingAdapter(transport),
-        DeepcoinFundingAdapter(transport),
-        KucoinFundingAdapter(transport),
-        HtxFundingAdapter(transport),
-        ToobitFundingAdapter(transport),
-        LighterFundingAdapter(transport),
-        GrvtFundingAdapter(transport),
-        BtseFundingAdapter(transport),
-        MexcFundingAdapter(transport),
-        XtFundingAdapter(transport),
-        BitfinexFundingAdapter(transport),
-    ]
     return {
-        venue: adapter
-        for adapter in adapters
-        for venue in {
-            BinanceFundingAdapter: ("BINANCE",),
-            BybitFundingAdapter: ("BYBIT",),
-            GateFundingAdapter: ("GATE",),
-            OkxFundingAdapter: ("OKX",),
-            HyperliquidFundingAdapter: ("HYPERLIQUID",),
-            KrakenFundingAdapter: ("KRAKEN",),
-            DeepcoinFundingAdapter: ("DEEPCOIN",),
-            KucoinFundingAdapter: ("KUCOIN",),
-            HtxFundingAdapter: ("HTX",),
-            ToobitFundingAdapter: ("TOOBIT",),
-            LighterFundingAdapter: ("LIGHTER",),
-            GrvtFundingAdapter: ("GRVT",),
-            BtseFundingAdapter: ("BTSE",),
-            MexcFundingAdapter: ("MEXC",),
-            XtFundingAdapter: ("XT",),
-            BitfinexFundingAdapter: ("BITFINEX",),
-        }[type(adapter)]
+        venue: adapter_type(transport)
+        for venue, adapter_type in _NATIVE_FUNDING_ADAPTER_TYPES
     }
+
+
+_NATIVE_FUNDING_ADAPTER_TYPES: tuple[
+    tuple[str, type[NativeFundingAdapter]], ...
+] = (
+    ("BINANCE", BinanceFundingAdapter),
+    ("BINGX", BingxFundingAdapter),
+    ("BYBIT", BybitFundingAdapter),
+    ("GATE", GateFundingAdapter),
+    ("OKX", OkxFundingAdapter),
+    ("HYPERLIQUID", HyperliquidFundingAdapter),
+    ("KRAKEN", KrakenFundingAdapter),
+    ("DEEPCOIN", DeepcoinFundingAdapter),
+    ("KUCOIN", KucoinFundingAdapter),
+    ("HTX", HtxFundingAdapter),
+    ("TOOBIT", ToobitFundingAdapter),
+    ("LIGHTER", LighterFundingAdapter),
+    ("GRVT", GrvtFundingAdapter),
+    ("BTSE", BtseFundingAdapter),
+    ("MEXC", MexcFundingAdapter),
+    ("XT", XtFundingAdapter),
+    ("BITFINEX", BitfinexFundingAdapter),
+)
 
 
 def _mexc_data(payload: Any, description: str) -> Any:

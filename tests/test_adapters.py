@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,7 @@ from perp_md import (
 from perp_md.adapters.ccxt import CcxtAdapter, resolve_ccxt_symbol
 from perp_md.adapters.native import (
     BinanceAdapter,
+    BingxAdapter,
     BitfinexAdapter,
     BtseAdapter,
     BybitAdapter,
@@ -72,6 +74,81 @@ KRAKEN_OPEN_INTEREST = json.loads(
 ADDED_VENUES = json.loads(
     (Path(__file__).parent / "fixtures" / "native_added_venues.json").read_text()
 )
+BINGX = json.loads(
+    (Path(__file__).parent / "fixtures" / "native_bingx.json").read_text()
+)
+
+
+def test_native_quote_notional_adapter_derives_base_quantity_at_mark_price():
+    async def handler(method, url, params):
+        if url.endswith("/openInterest"):
+            return BINGX["open_interest_linear"]
+        return BINGX["premium_linear"]
+
+    result = asyncio.run(
+        BingxAdapter(StubTransport(handler), request_interval_seconds=0).fetch(
+            instrument(
+                "BINGX",
+                symbol="BASE-QUOTE",
+                contract_direction=ContractDirection.LINEAR,
+            ),
+            None,
+            include_history=True,
+        )
+    )
+
+    assert result.current.native_value == 308.5
+    assert result.current.native_unit is NativeUnit.QUOTE
+    assert result.current.value_usd == 308.5
+    assert result.current.mark_price == 2.5
+    assert result.current.base_quantity is not None
+    assert result.current.base_quantity.amount == Decimal("123.4")
+    assert result.history == ()
+
+
+def test_native_inverse_adapter_converts_base_quantity_at_mark_price():
+    async def handler(method, url, params):
+        if url.endswith("/openInterest"):
+            return BINGX["open_interest_inverse"]
+        return BINGX["premium_inverse"]
+
+    result = asyncio.run(
+        BingxAdapter(StubTransport(handler), request_interval_seconds=0).fetch(
+            instrument(
+                "BINGX",
+                symbol="OTHER-USD",
+                contract_direction=ContractDirection.INVERSE,
+            ),
+            None,
+            include_history=False,
+        )
+    )
+
+    assert result.current.native_value == 12.5
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.value_usd == 625
+    assert result.current.mark_price == 50
+    assert result.current.base_quantity is not None
+    assert result.current.base_quantity.amount == Decimal("12.5")
+    assert result.current.timestamp_ms == 1788220800100
+
+
+def test_native_adapter_rejects_mismatched_endpoint_identity():
+    async def handler(method, url, params):
+        return BINGX["mismatched"]
+
+    with pytest.raises(DataUnavailable):
+        asyncio.run(
+            BingxAdapter(StubTransport(handler), request_interval_seconds=0).fetch(
+                instrument(
+                    "BINGX",
+                    symbol="BASE-QUOTE",
+                    contract_direction=ContractDirection.LINEAR,
+                ),
+                None,
+                include_history=False,
+            )
+        )
 
 
 def test_ccxt_market_initialization_closes_exchange_when_cancelled(monkeypatch):
@@ -175,7 +252,7 @@ def instrument(venue: str, **values: Any) -> Instrument:
 
 def test_binance_pages_backward_deduplicates_and_keeps_current(monkeypatch):
     pages = FIXTURE["binance"]["history"]
-    monkeypatch.setattr(native, "BINANCE_HISTORY_LIMIT", 2)
+    monkeypatch.setattr(native.binance, "BINANCE_HISTORY_LIMIT", 2)
 
     async def handler(method, url, params):
         if url.endswith("openInterestHist"):
@@ -300,7 +377,7 @@ def test_gate_current_includes_both_position_sides():
 
 def test_gate_continues_after_a_short_sparse_history_page(monkeypatch):
     pages = FIXTURE["gate"]["sparse_history"]
-    monkeypatch.setattr(native, "GATE_HISTORY_LIMIT", 3)
+    monkeypatch.setattr(native.gate, "GATE_HISTORY_LIMIT", 3)
 
     async def handler(method, url, params):
         if url.endswith("contract_stats"):
@@ -1029,7 +1106,7 @@ def test_malformed_analytics_history_preserves_current_observation(fixture_name)
 
 
 def test_history_pagination_bound_preserves_current_observation(monkeypatch):
-    monkeypatch.setattr(native, "HISTORY_MAX_PAGES", 1)
+    monkeypatch.setattr(native.kraken, "HISTORY_MAX_PAGES", 1)
 
     async def handler(method, url, params):
         if url.endswith("/open-interest"):
@@ -1669,11 +1746,10 @@ def test_ranked_optional_metrics_use_exact_runtime_provider_ids():
     assert {
         venue: adapter.exchange_ids[venue]
         for venue in (
-            "WEEX", "BINGX", "ASTER", "DIGIFINEX", "CRYPTOCOM", "BLOFIN"
+            "WEEX", "ASTER", "DIGIFINEX", "CRYPTOCOM", "BLOFIN"
         )
     } == {
         "WEEX": "weex",
-        "BINGX": "bingx",
         "ASTER": "aster",
         "DIGIFINEX": "digifinex",
         "CRYPTOCOM": "cryptocom",
@@ -1681,57 +1757,15 @@ def test_ranked_optional_metrics_use_exact_runtime_provider_ids():
     }
 
 
-@pytest.mark.parametrize("payload_key", ["current", "malformed"])
-def test_standardized_base_quantity_open_interest_uses_mark_without_contract_scaling(
-    monkeypatch, payload_key
-):
-    fixture = CCXT_BASE_QUANTITY
-
-    class Exchange:
-        has = {"fetchOpenInterest": True, "fetchOpenInterestHistory": False}
-        markets_by_id = {
-            fixture["market_id"]: [{"symbol": fixture["symbol"], "contract": True}]
-        }
-
-        async def fetch_open_interest(self, symbol):
-            assert symbol == fixture["symbol"]
-            return fixture[payload_key]
-
-        async def fetch_ticker(self, symbol):
-            assert symbol == fixture["symbol"]
-            return fixture["ticker"]
-
-        async def close(self):
-            return None
-
-    exchange = Exchange()
-    monkeypatch.setattr(
-        ccxt_adapter_module.importlib,
-        "import_module",
-        lambda name: SimpleNamespace(weex=object),
-    )
+def test_ambiguous_standardized_open_interest_is_not_acquired():
     adapter = CcxtAdapter()
-    adapter.exchanges["WEEX"] = exchange
-    subject = instrument(
-        "WEEX",
-        symbol=fixture["market_id"],
-        contract_multiplier=0.01,
-    )
+    subject = instrument("WEEX", contract_multiplier=0.01)
 
-    if payload_key == "malformed":
-        with pytest.raises(InvalidResponse):
-            asyncio.run(adapter.fetch(subject, None, include_history=False))
-        return
-
-    result = asyncio.run(adapter.fetch(subject, None, include_history=False))
-
-    assert result.current.native_value == pytest.approx(125.5)
-    assert result.current.native_unit is NativeUnit.BASE
-    assert result.current.base_quantity is not None
-    assert float(result.current.base_quantity.amount) == pytest.approx(125.5)
-    assert result.current.value_usd == pytest.approx(2_510)
-    assert result.current.mark_price == pytest.approx(20)
-    assert result.current.valuation is ValuationMethod.MARK_PRICE
+    capabilities = adapter.capabilities(subject)
+    assert capabilities.current is False
+    assert capabilities.history is False
+    with pytest.raises(DataUnavailable, match="not supported"):
+        asyncio.run(adapter.fetch(subject, None, include_history=False))
 
 
 def test_ccxt_hourly_history_uses_supported_cadence_and_source_timestamps(monkeypatch):
