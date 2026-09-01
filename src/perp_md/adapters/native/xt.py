@@ -8,6 +8,7 @@ from ._common import (
     InvalidInstrument,
     InvalidResponse,
     NativeAdapter,
+    NativeUnit,
     OpenInterestCapabilities,
     OpenInterestObservation,
     OpenInterestResult,
@@ -15,6 +16,7 @@ from ._common import (
     _integer_ms,
     _require_identity,
     number,
+    proven_base_quantity,
 )
 
 
@@ -54,16 +56,24 @@ class XtAdapter(NativeAdapter):
             raise InvalidResponse("provider returned an invalid open-interest snapshot")
         row = payload["result"]
         _require_identity(row, "symbol", instrument.symbol)
-        if row.get("openInterestUsd") in (None, "") or row.get("time") is None:
+        if (
+            row.get("openInterest") in (None, "")
+            or row.get("openInterestUsd") in (None, "")
+            or row.get("time") is None
+        ):
             raise DataUnavailable(
-                "provider omitted open-interest notional or source time"
+                "provider omitted open-interest quantity, notional, or source time"
             )
+        quantity = number(row["openInterest"])
         return OpenInterestResult(
             OpenInterestObservation(
                 _integer_ms(row["time"], "open-interest"),
                 number(row["openInterestUsd"]),
+                quantity,
+                NativeUnit.BASE,
                 valuation=ValuationMethod.VENUE_REPORTED,
+                base_quantity=proven_base_quantity(
+                    instrument, quantity, NativeUnit.BASE
+                ),
             )
         )
-
-

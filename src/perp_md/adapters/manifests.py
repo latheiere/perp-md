@@ -1999,6 +1999,13 @@ BUILTIN_ADAPTER_MANIFESTS = (
                         CURRENT,
                         source="openInterestUsd",
                     ),
+                    _capability(
+                        "xt.perpetual.linear.open-interest.base-quantity.current",
+                        DataPointKind.OPEN_INTEREST_BASE_QUANTITY,
+                        TemporalMode.CURRENT,
+                        "openInterest",
+                        CURRENT,
+                    ),
                     _funding(
                         "xt.perpetual.linear",
                         DataPointKind.FUNDING_NEXT_RATE,

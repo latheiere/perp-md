@@ -1494,7 +1494,7 @@ def test_phemex_inverse_open_interest_preserves_contract_count_and_quote_value()
     assert result.current.mark_price is None
 
 
-def test_provider_reported_notional_preserves_source_time_without_inventing_quantity():
+def test_provider_reported_quantity_and_notional_preserve_source_time():
     fixture = ADDED_VENUES["xt"]
 
     async def handler(method, url, params):
@@ -1509,8 +1509,10 @@ def test_provider_reported_notional_preserves_source_time_without_inventing_quan
     )
 
     assert result.current.value_usd == 20
-    assert result.current.native_value is None
-    assert result.current.native_unit is None
+    assert result.current.native_value == 4
+    assert result.current.native_unit is NativeUnit.BASE
+    assert result.current.base_quantity is not None
+    assert float(result.current.base_quantity.amount) == 4
     assert result.current.timestamp_kind is ObservationTimeKind.SOURCE
     assert result.history == ()
 
@@ -1520,6 +1522,20 @@ def test_provider_reported_notional_rejects_mismatched_identity():
         return ADDED_VENUES["xt"]["malformed"]
 
     with pytest.raises(InvalidResponse):
+        asyncio.run(
+            XtAdapter(StubTransport(handler)).fetch(
+                instrument("XT", symbol="BASE_QUOTE"),
+                None,
+                include_history=False,
+            )
+        )
+
+
+def test_provider_reported_notional_rejects_missing_quantity():
+    async def handler(method, url, params):
+        return ADDED_VENUES["xt"]["missing_quantity"]
+
+    with pytest.raises(DataUnavailable, match="omitted open-interest quantity"):
         asyncio.run(
             XtAdapter(StubTransport(handler)).fetch(
                 instrument("XT", symbol="BASE_QUOTE"),

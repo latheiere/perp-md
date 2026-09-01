@@ -322,6 +322,7 @@ def test_native_notional_and_funding_share_one_exact_product_mapping():
     assert mapping["adapter_id"] == "native.xt"
     assert {item["datapoint"]["kind"] for item in capabilities} == {
         "open_interest.notional",
+        "open_interest.base_quantity",
         "funding.next_rate",
         "funding.settled_rate",
         "funding.interval",
@@ -337,6 +338,13 @@ def test_native_notional_and_funding_share_one_exact_product_mapping():
     native_oi = assess_capability(
         "XT",
         DataPointKind.OPEN_INTEREST_NOTIONAL,
+        subject,
+        native_identities=identity(),
+        temporal_mode=TemporalMode.CURRENT,
+    )
+    native_quantity = assess_capability(
+        "XT",
+        DataPointKind.OPEN_INTEREST_BASE_QUANTITY,
         subject,
         native_identities=identity(),
         temporal_mode=TemporalMode.CURRENT,
@@ -357,6 +365,7 @@ def test_native_notional_and_funding_share_one_exact_product_mapping():
     )
 
     assert native_oi.status is CapabilityStatus.SUPPORTED
+    assert native_quantity.status is CapabilityStatus.SUPPORTED
     assert current_funding.status is CapabilityStatus.SUPPORTED
     assert historical_funding.status is CapabilityStatus.SUPPORTED
 
@@ -456,7 +465,7 @@ def test_manifest_is_deterministic_and_embeds_exact_cdm_wire_contracts():
 
     assert first == second
     assert payload["schema_version"] == "acquisition.coverage/v1"
-    assert payload["producer"] == {"name": "perp-md", "version": "0.5.0"}
+    assert payload["producer"] == {"name": "perp-md", "version": "0.5.1"}
     assert payload["mappings"] == sorted(
         payload["mappings"], key=lambda item: item["mapping_id"]
     )

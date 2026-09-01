@@ -3,6 +3,13 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.1 - 2026-09-02
+
+- Preserve a provider-reported base open-position field alongside its
+  reporting notional when both values share one validated current snapshot.
+- Declare the direct base-quantity capability so consumers can distinguish
+  complete dual-measure acquisition from notional-only coverage.
+
 ## 0.5.0 - 2026-09-01
 
 - Add native catalog-aligned open-interest and funding acquisition for a
