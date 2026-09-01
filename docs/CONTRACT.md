@@ -78,6 +78,11 @@ normalized notional alone does not prove a base quantity. Contract-count
 conversion requires a positive base-denominated multiplier. Consumers must not
 repeat adapter-specific unit assumptions when this typed field is absent.
 
+When one venue snapshot reports both a base-denominated open position and its
+reporting notional, the adapter preserves both native measures at the provider
+source time. It does not discard the direct quantity merely because a normalized
+notional is also available.
+
 When a provider publishes current OI in different dimensions across linear and
 inverse product families, the native adapter preserves each field in its
 observed dimension and performs only the mark-price conversion needed for the
