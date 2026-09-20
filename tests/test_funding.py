@@ -50,6 +50,10 @@ BINGX = json.loads(
     (Path(__file__).parent / "fixtures" / "native_bingx.json").read_text()
 )
 
+FUNDING_EDGE_CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "funding_edge_cases.json").read_text()
+)
+
 
 def test_native_funding_preserves_current_and_bounded_settled_history():
     async def handler(method, url, params):
@@ -1254,3 +1258,100 @@ def test_paced_funding_history_pagination_preserves_every_page(monkeypatch):
         Decimal("0.00002"),
         Decimal("0.00003"),
     ]
+
+
+
+def test_nanosecond_funding_timestamps_preserve_millisecond_buckets_without_float_rounding():
+    fixture = FUNDING_EDGE_CASES["grvt"]
+    async def handler(method, url, params):
+        return fixture["submillisecond_history"] if url.endswith("/funding") else fixture["submillisecond_current"]
+    result = asyncio.run(GrvtFundingAdapter(StubTransport(handler)).fetch(
+        instrument("GRVT", symbol="BASE_QUOTE_Perp"), None, include_history=True
+    ))
+    assert result.current.timestamp_ms == 1700000000123
+    assert result.history[0].timestamp_ms == 1699942400456
+    assert result.history_issue is None
+
+
+@pytest.mark.parametrize("value", [True, -1, "-1", "", "1.5", "NaN", "Infinity", 1700000000123999999.0])
+def test_nanosecond_timestamp_validation_rejects_malformed_or_lossy_inputs(value):
+    with pytest.raises(InvalidResponse, match="invalid source timestamp"):
+        funding_module._nanoseconds_to_ms(value)
+
+
+def test_invalid_nanosecond_current_is_rejected_and_partial_history_preserves_current():
+    fixture = FUNDING_EDGE_CASES["grvt"]
+    async def invalid_current(method, url, params):
+        return fixture["malformed_timestamp"]
+    with pytest.raises(InvalidResponse, match="invalid source timestamp"):
+        asyncio.run(GrvtFundingAdapter(StubTransport(invalid_current)).fetch(
+            instrument("GRVT", symbol="BASE_QUOTE_Perp"), None, include_history=False
+        ))
+    async def partial_history(method, url, params):
+        if url.endswith("/funding"):
+            return {"result": [{"instrument": "BASE_QUOTE_Perp", "funding_time": "invalid"}]}
+        return fixture["submillisecond_current"]
+    result = asyncio.run(GrvtFundingAdapter(StubTransport(partial_history)).fetch(
+        instrument("GRVT", symbol="BASE_QUOTE_Perp"), None, include_history=True
+    ))
+    assert result.current.timestamp_ms == 1700000000123
+    assert result.history == ()
+    assert result.history_issue is not None
+
+
+def test_current_and_history_funding_requests_share_one_paced_budget():
+    fake = FakePacerTime()
+    times = []
+    fixture = ADDED_VENUES["mexc_funding"]
+    async def handler(method, url, params):
+        times.append(fake.clock())
+        if url.endswith('/history'):
+            return fixture['history_empty']
+        return fixture['current']
+    async def scenario():
+        adapter = MexcFundingAdapter(StubTransport(handler), request_clock=fake.clock, sleep=fake.sleep)
+        await asyncio.gather(*[
+            adapter.fetch(instrument('MEXC', symbol='BASE_QUOTE'), None, include_history=True)
+            for _ in range(3)
+        ])
+    asyncio.run(scenario())
+    assert len(times) == 6
+    assert all(b-a >= .15-1e-9 for a,b in zip(times,times[1:]))
+
+
+def test_http_success_with_provider_throttling_is_retryable_and_not_cached():
+    import httpx
+    from perp_md.errors import RequestError
+    from perp_md.transport import HttpxTransport
+    fixture = ADDED_VENUES["mexc_funding"]
+    async def scenario():
+        calls = 0
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200,json=FUNDING_EDGE_CASES['rate_limited'] if calls==1 else fixture['current'])
+        transport=HttpxTransport()
+        transport._http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        adapter=MexcFundingAdapter(transport,request_interval_seconds=0)
+        subject=instrument('MEXC',symbol='BASE_QUOTE')
+        with pytest.raises(RequestError) as error:
+            await adapter.fetch(subject,None,include_history=False)
+        assert error.value.provider_code=='510'
+        result=await adapter.fetch(subject,None,include_history=False)
+        assert result.current.rate==pytest.approx(.0001)
+        assert calls==2
+        await transport.close()
+    asyncio.run(scenario())
+
+
+def test_history_throttling_keeps_valid_current_and_a_retryable_provider_code():
+    fixture=ADDED_VENUES['mexc_funding']
+    async def handler(method,url,params):
+        return FUNDING_EDGE_CASES['rate_limited'] if url.endswith('/history') else fixture['current']
+    result=asyncio.run(MexcFundingAdapter(StubTransport(handler),request_interval_seconds=0).fetch(
+        instrument('MEXC',symbol='BASE_QUOTE'),None,include_history=True
+    ))
+    assert result.current.rate==pytest.approx(.0001)
+    assert result.history==()
+    assert result.history_issue.retryable
+    assert 'code=510' in result.history_issue.message

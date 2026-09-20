@@ -344,7 +344,28 @@ All expected library failures derive from `PerpMdError`:
   ambiguous; the exception carries the CDM selection result.
 - `InvalidResponse`: the venue returned an invalid or incomplete payload.
 - `PaginationError`: a bounded history traversal could not safely progress.
-- `RequestError`: bounded external I/O failed.
+- `RequestError`: bounded external I/O failed or a provider explicitly throttled
+  acquisition. Optional `provider_code` retains the provider's machine-readable
+  rejection code. Consumers may apply bounded retries with backoff.
+
+Identical concurrent HTTP requests share both success and failure semantics:
+every waiting consumer receives the same error category. Cancellation of one
+waiter does not cancel the shared request. Failed requests are evicted without
+removing a newer replacement. `HttpxTransport.invalidate_get` optionally lets
+an adapter discard a specific HTTP-success response rejected by the provider;
+custom transports with response caches should implement the same hook.
+
+The nanosecond funding adapter parses integer timestamps without floating-point
+conversion and floors them to the containing millisecond. Sub-millisecond
+precision is valid; fractional nanoseconds, negative values, and lossy floating
+inputs are rejected. Current and historical funding use the same conversion.
+
+The funding adapter for HTTP-success envelopes with provider throttle code
+`510` shares a 150-millisecond post-completion request interval across current
+and historical requests. It invalidates rejected cached responses and reports
+throttling as `RequestError`, retaining valid current observations when only
+history is throttled. Pacing is scoped to one adapter instance; independently
+created clients sharing an egress address still share the provider's budget.
 
 Error messages do not name or depend on any catalog, service, database, or UI.
 

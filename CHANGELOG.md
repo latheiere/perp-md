@@ -3,6 +3,16 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.2 - 2026-09-21
+
+- Accept sub-millisecond source timestamps in nanosecond funding feeds without
+  floating-point rounding across millisecond boundaries.
+- Pace current and historical funding requests for a provider with in-body
+  throttling responses; preserve its rejection code and invalidate rejected
+  cached responses before bounded consumer retries.
+- Normalize shared HTTP request failures for every waiting consumer, preserving
+  retries after connection failures and protecting newer cached requests.
+
 ## 0.5.1 - 2026-09-02
 
 - Preserve a provider-reported base open-position field alongside its
