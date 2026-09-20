@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+import pytest
+from perp_md.errors import RequestError
+
 from perp_md.transport import HttpxTransport
 
 
@@ -67,3 +71,59 @@ def test_http_transport_observes_failure_after_shielded_waiter_is_cancelled():
     asyncio.run(scenario())
 
     assert reported == []
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_shared_request_failures_are_retryable_for_every_waiter(method):
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+                raise httpx.ConnectTimeout("connection timed out", request=request)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = HttpxTransport()
+        transport._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async def fetch():
+            if method == "get":
+                return await transport.get("https://data.invalid/snapshot")
+            return await transport.post("https://data.invalid/snapshot", {})
+
+        tasks = [asyncio.create_task(fetch()) for _ in range(4)]
+        await started.wait()
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(isinstance(result, RequestError) for result in results)
+        assert all(isinstance(result.__cause__, httpx.ConnectTimeout) for result in results)
+        assert await fetch() == {"ok": True}
+        assert calls == 2
+        await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_rejected_response_invalidation_preserves_newer_cached_response():
+    async def scenario():
+        calls = 0
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={"generation": calls})
+        transport = HttpxTransport()
+        transport._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        url = "https://data.invalid/snapshot"
+        first = await transport.get(url)
+        transport.invalidate_get(url, response=first)
+        second = await transport.get(url)
+        transport.invalidate_get(url, response=first)
+        assert await transport.get(url) is second
+        assert calls == 2
+        await transport.close()
+    asyncio.run(scenario())

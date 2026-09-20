@@ -61,4 +61,8 @@ class PaginationError(PerpMdError):
 
 
 class RequestError(PerpMdError):
-    """A bounded external request failed."""
+    """A bounded external request failed, optionally with a provider code."""
+
+    def __init__(self, message: str, *, provider_code: str | None = None) -> None:
+        super().__init__(message)
+        self.provider_code = provider_code

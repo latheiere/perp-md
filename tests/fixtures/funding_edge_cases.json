@@ -1,0 +1,42 @@
+{
+  "grvt": {
+    "submillisecond_current": {
+      "result": {
+        "event_time": "1700000000123999999",
+        "instrument": "BASE_QUOTE_Perp",
+        "mark_price": "5",
+        "open_interest": "4",
+        "funding_rate": "100",
+        "funding_interval_hours": "8",
+        "next_funding_time": "1700028800000000000"
+      }
+    },
+    "submillisecond_history": {
+      "result": [
+        {
+          "instrument": "BASE_QUOTE_Perp",
+          "funding_rate": "80",
+          "funding_time": "1699942400456999999",
+          "funding_interval_hours": "8"
+        }
+      ],
+      "next": ""
+    },
+    "malformed_timestamp": {
+      "result": {
+        "event_time": "1700000000123999999.5",
+        "instrument": "BASE_QUOTE_Perp",
+        "mark_price": "5",
+        "open_interest": "4",
+        "funding_rate": "100",
+        "funding_interval_hours": "8",
+        "next_funding_time": "1700028800000000000"
+      }
+    }
+  },
+  "rate_limited": {
+    "success": false,
+    "code": 510,
+    "message": "Requests are too frequent, please try again later"
+  }
+}

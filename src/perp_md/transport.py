@@ -103,18 +103,38 @@ class HttpxTransport:
         now = time.monotonic()
         cached = self._cache.get(key)
         if cached and now - cached[0] <= self.cache_ttl_seconds:
-            return await asyncio.shield(cached[1])
-        task = asyncio.create_task(factory())
-        task.add_done_callback(_observe_task_result)
-        self._cache[key] = now, task
+            task = cached[1]
+        else:
+            task = asyncio.create_task(factory())
+            task.add_done_callback(_observe_task_result)
+            self._cache[key] = now, task
         try:
             return await asyncio.shield(task)
         except PerpMdError:
-            self._cache.pop(key, None)
+            self._evict(key, task)
             raise
         except (httpx.HTTPError, ValueError) as exc:
-            self._cache.pop(key, None)
+            self._evict(key, task)
             raise RequestError("venue request failed") from exc
+
+    def _evict(self, key: str, task: asyncio.Task[Any]) -> None:
+        cached = self._cache.get(key)
+        if cached is not None and cached[1] is task:
+            self._cache.pop(key, None)
+
+    def invalidate_get(
+        self, url: str, params: dict[str, Any] | None = None, *, response: Any
+    ) -> None:
+        """Discard a rejected response without evicting a newer request."""
+        key = f"GET:{url}:{json.dumps(params or {}, sort_keys=True, separators=(',', ':'))}"
+        cached = self._cache.get(key)
+        if cached is None:
+            return
+        task = cached[1]
+        if task.done() and not task.cancelled() and task.exception() is None:
+            if task.result() is response:
+                self._evict(key, task)
+
 
 
 def _observe_task_result(task: asyncio.Task[Any]) -> None:

@@ -16,6 +16,7 @@ from perp_md.errors import (
     InvalidInstrument,
     InvalidResponse,
     PaginationError,
+    RequestError,
 )
 from perp_md.funding_values import (
     explicit_interval,
@@ -1228,7 +1229,33 @@ class BingxFundingAdapter(NativeFundingAdapter):
         )
 
 
+@dataclass
 class MexcFundingAdapter(NativeFundingAdapter):
+    request_interval_seconds: float = 0.15
+    request_clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    _request_pacer: RequestPacer = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._request_pacer = RequestPacer(
+            self.request_interval_seconds, clock=self.request_clock, sleep=self.sleep
+        )
+
+    async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        async def request() -> Any:
+            payload = await self.transport.get(url, params)
+            if isinstance(payload, dict) and str(payload.get("code")) == "510":
+                invalidate = getattr(self.transport, "invalidate_get", None)
+                if invalidate is not None:
+                    invalidate(url, params, response=payload)
+                raise RequestError(
+                    "provider rate limited the funding request (code=510)",
+                    provider_code="510",
+                )
+            return payload
+
+        return await self._request_pacer.request(request)
+
     def supports(self, instrument: Instrument) -> bool:
         return instrument.venue == "MEXC" and instrument.market_type != "future"
 
@@ -1236,7 +1263,7 @@ class MexcFundingAdapter(NativeFundingAdapter):
         return FundingCapabilities(True, (FundingRateKind.NEXT,), True)
 
     async def fetch(self, instrument, history, *, include_history):
-        payload = await self.transport.get(
+        payload = await self._get(
             f"https://contract.mexc.com/api/v1/contract/funding_rate/{instrument.symbol}"
         )
         row = _mexc_data(payload, "funding snapshot")
@@ -1265,7 +1292,7 @@ class MexcFundingAdapter(NativeFundingAdapter):
     ) -> tuple[FundingObservation, ...]:
         rows: dict[int, FundingObservation] = {}
         for page_number in range(1, FUNDING_HISTORY_MAX_PAGES + 1):
-            payload = await self.transport.get(
+            payload = await self._get(
                 "https://contract.mexc.com/api/v1/contract/funding_rate/history",
                 {
                     "symbol": symbol,
@@ -1729,9 +1756,15 @@ def _period_interval(value: Any) -> FundingIntervalV1:
 
 
 def _nanoseconds_to_ms(value: Any) -> int:
-    timestamp = _integer_timestamp_ms(value)
-    if timestamp % 1_000_000:
-        raise InvalidResponse("provider returned a non-millisecond source timestamp")
+    # Integer parsing must precede unit conversion: epoch nanoseconds exceed
+    # the exact integer range of a binary64 float.
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise InvalidResponse("provider returned an invalid source timestamp")
+    if isinstance(value, str) and (not value or not value.isascii() or not value.isdigit()):
+        raise InvalidResponse("provider returned an invalid source timestamp")
+    timestamp = int(value)
+    if timestamp < 0:
+        raise InvalidResponse("provider returned an invalid source timestamp")
     return timestamp // 1_000_000
 
 
