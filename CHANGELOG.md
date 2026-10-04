@@ -3,6 +3,14 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.3 - 2026-10-04
+
+- Expire successful HTTP responses after completion even when their request
+  keys are never reused, preventing timestamped history windows from retaining
+  payloads for the lifetime of a client.
+- Keep identical pending requests shared beyond the response TTL and release
+  expiry timers when responses are invalidated or the transport closes.
+
 ## 0.5.2 - 2026-09-21
 
 - Accept sub-millisecond source timestamps in nanosecond funding feeds without

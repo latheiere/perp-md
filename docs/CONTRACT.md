@@ -371,6 +371,11 @@ Error messages do not name or depend on any catalog, service, database, or UI.
 
 ## Compatibility
 
+The default HTTP transport shares identical pending requests until completion.
+Successful responses are retained for three seconds after completion and
+expire even when no later request reuses their key. Failed responses are
+evicted; invalidation and shutdown release their associated expiry timers.
+
 The public imports re-exported from `perp_md` form the supported API. Adapter
 internals and venue payload parsers are not public. In `0.x` releases, minor
 versions may change the public API and patch versions preserve compatibility.

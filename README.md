@@ -7,6 +7,11 @@
 Typed, asynchronous acquisition of perpetual-market open interest and funding
 for Python applications.
 
+Release `0.5.3` expires completed HTTP response payloads without requiring the
+same request key to recur. Timestamped history windows cannot accumulate
+responses for the lifetime of a client. Identical pending requests remain
+shared until completion; successful responses retain the three-second TTL.
+
 `perp-md` turns provider-independent
 [CDM instrument references](https://github.com/latheiere/crypto-derivative-markets)
 into source-faithful observations. It keeps provider protocols, identity
