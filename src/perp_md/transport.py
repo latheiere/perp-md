@@ -32,12 +32,17 @@ class HttpxTransport:
     _cache: dict[str, tuple[float, asyncio.Task[Any]]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _expiry: dict[str, asyncio.TimerHandle] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if self.request_concurrency <= 0 or self.per_host_concurrency <= 0:
             raise ValueError("concurrency limits must be positive")
+        if self.cache_ttl_seconds < 0:
+            raise ValueError("cache_ttl_seconds must not be negative")
         self._global = asyncio.Semaphore(self.request_concurrency)
 
     async def get(self, url: str, params: dict[str, Any] | None = None) -> Any:
@@ -78,6 +83,9 @@ class HttpxTransport:
 
     async def close(self) -> None:
         tasks = [task for _, task in self._cache.values() if not task.done()]
+        for handle in self._expiry.values():
+            handle.cancel()
+        self._expiry.clear()
         self._cache.clear()
         for task in tasks:
             task.cancel()
@@ -102,11 +110,13 @@ class HttpxTransport:
     async def _cached(self, key: str, factory: Callable[[], Awaitable[Any]]) -> Any:
         now = time.monotonic()
         cached = self._cache.get(key)
-        if cached and now - cached[0] <= self.cache_ttl_seconds:
+        if cached and (not cached[1].done() or now - cached[0] <= self.cache_ttl_seconds):
             task = cached[1]
         else:
+            if cached:
+                self._evict(key, cached[1])
             task = asyncio.create_task(factory())
-            task.add_done_callback(_observe_task_result)
+            task.add_done_callback(lambda completed: self._completed(key, completed))
             self._cache[key] = now, task
         try:
             return await asyncio.shield(task)
@@ -117,10 +127,28 @@ class HttpxTransport:
             self._evict(key, task)
             raise RequestError("venue request failed") from exc
 
+    def _completed(self, key: str, task: asyncio.Task[Any]) -> None:
+        _observe_task_result(task)
+        cached = self._cache.get(key)
+        if cached is None or cached[1] is not task:
+            return
+        if task.cancelled() or task.exception() is not None or self.cache_ttl_seconds == 0:
+            self._evict(key, task)
+            return
+        # Expire even if a timestamped request key is never used again. Pending
+        # requests stay shared until completion; the response TTL starts then.
+        self._cache[key] = time.monotonic(), task
+        self._expiry[key] = asyncio.get_running_loop().call_later(
+            self.cache_ttl_seconds, self._evict, key, task
+        )
+
     def _evict(self, key: str, task: asyncio.Task[Any]) -> None:
         cached = self._cache.get(key)
         if cached is not None and cached[1] is task:
             self._cache.pop(key, None)
+            handle = self._expiry.pop(key, None)
+            if handle is not None:
+                handle.cancel()
 
     def invalidate_get(
         self, url: str, params: dict[str, Any] | None = None, *, response: Any

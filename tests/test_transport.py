@@ -1,12 +1,71 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 
 import httpx
 import pytest
 from perp_md.errors import RequestError
 
 from perp_md.transport import HttpxTransport
+
+
+def test_unique_request_payloads_expire_without_another_request():
+    class Payload(dict):
+        pass
+
+    async def scenario():
+        transport = HttpxTransport(cache_ttl_seconds=0.01)
+        references = []
+
+        async def request():
+            payload = Payload(body="x" * 32768)
+            references.append(weakref.ref(payload))
+            return payload
+
+        try:
+            for index in range(128):
+                await transport._cached(f"history-window-{index}", request)
+            await asyncio.sleep(0.05)
+            gc.collect()
+            assert not transport._cache
+            assert not transport._expiry
+            assert all(reference() is None for reference in references)
+        finally:
+            await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_pending_request_remains_shared_after_the_response_ttl():
+    async def scenario():
+        transport = HttpxTransport(cache_ttl_seconds=0.01)
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def request():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            return {"ok": True}
+
+        first = asyncio.create_task(transport._cached("snapshot", request))
+        await entered.wait()
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(transport._cached("snapshot", request))
+        await asyncio.sleep(0)
+        release.set()
+        try:
+            values = await asyncio.gather(first, second)
+            assert values[0] is values[1]
+            assert calls == 1
+        finally:
+            await transport.close()
+        assert not transport._expiry
+
+    asyncio.run(scenario())
 
 
 def test_http_transport_deduplicates_identical_concurrent_requests(monkeypatch):
