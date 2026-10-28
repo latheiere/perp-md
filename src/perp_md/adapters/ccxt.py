@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -75,6 +76,25 @@ class CcxtAdapter:
     )
     exchanges: dict[str, Any] = field(default_factory=dict, init=False)
     locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    catalog_ttl_seconds: float = 900
+    catalog_miss_refresh_seconds: float = 60
+    catalog_max_bytes: int = 64 * 1024 * 1024
+    catalog_max_entries: int = 16
+    _loaded_at: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _catalog_sizes: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _expiry: dict[str, asyncio.TimerHandle] = field(default_factory=dict, init=False, repr=False)
+    _users: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    _retired: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    _closing: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)
+    _loads: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2), init=False, repr=False)
+    _retry_after: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _retry_expiry: dict[str, asyncio.TimerHandle] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.catalog_ttl_seconds <= 0 or self.catalog_miss_refresh_seconds <= 0:
+            raise ValueError("catalog lifetimes must be positive")
+        if self.catalog_max_bytes <= 0 or self.catalog_max_entries <= 0:
+            raise ValueError("catalog retention limits must be positive")
 
     def supports(self, instrument: Instrument) -> bool:
         return instrument.venue in self.exchange_ids
@@ -131,12 +151,14 @@ class CcxtAdapter:
         *,
         include_history: bool,
     ) -> OpenInterestResult:
+        exchange = None
         try:
             if instrument.venue == "COINBASE":
                 return await self._coinbase(instrument)
             if not self.capabilities(instrument).current:
                 raise DataUnavailable("open interest is not supported for this venue")
             exchange, symbol = await self._market(instrument)
+            self._users[id(exchange)] = self._users.get(id(exchange), 0) + 1
             if not exchange.has.get("fetchOpenInterest"):
                 raise DataUnavailable("open interest is not available for this venue")
             payload = await exchange.fetch_open_interest(symbol)
@@ -242,13 +264,19 @@ class CcxtAdapter:
             raise
         except Exception as exc:
             raise RequestError("venue adapter request failed") from exc
+        finally:
+            if exchange is not None:
+                await self._release_market(exchange)
 
     async def close(self) -> None:
-        exchanges = list(self.exchanges.values())
-        self.exchanges.clear()
-        await asyncio.gather(
-            *(exchange.close() for exchange in exchanges), return_exceptions=True
-        )
+        for handle in self._retry_expiry.values():
+            handle.cancel()
+        self._retry_expiry.clear()
+        self._retry_after.clear()
+        for venue, exchange in list(self.exchanges.items()):
+            self._discard_catalog(venue, exchange)
+        if self._closing:
+            await asyncio.gather(*self._closing, return_exceptions=True)
 
     async def _coinbase(self, instrument: Instrument) -> OpenInterestResult:
         exchange, owned = self._runtime_exchange(instrument)
@@ -302,7 +330,22 @@ class CcxtAdapter:
             raise AdapterUnavailable("no CCXT adapter is configured for this venue")
         async with self.locks.setdefault(instrument.venue, asyncio.Lock()):
             exchange = self.exchanges.get(instrument.venue)
+            if exchange is not None:
+                try:
+                    symbol = resolve_ccxt_symbol(exchange, instrument)
+                except DataUnavailable:
+                    loaded_at = self._loaded_at.setdefault(instrument.venue, time.monotonic())
+                    if time.monotonic() - loaded_at < self.catalog_miss_refresh_seconds:
+                        raise
+                    self._discard_catalog(instrument.venue, exchange)
+                    exchange = None
+                else:
+                    if instrument.venue not in self._expiry:
+                        self._retain_catalog(instrument.venue, exchange)
+                    return exchange, symbol
             if exchange is None:
+                if time.monotonic() < self._retry_after.get(instrument.venue, 0):
+                    raise RequestError("venue market catalog retry is cooling down")
                 exchange = getattr(ccxt, exchange_id)(
                     {
                         "enableRateLimit": True,
@@ -310,15 +353,82 @@ class CcxtAdapter:
                     }
                 )
                 try:
-                    await exchange.load_markets()
+                    async with self._loads:
+                        await exchange.load_markets()
                 except asyncio.CancelledError:
                     await exchange.close()
                     raise
                 except Exception as exc:
                     await exchange.close()
+                    self._retry_after[instrument.venue] = (
+                        time.monotonic() + self.catalog_miss_refresh_seconds
+                    )
+                    self._retry_expiry[instrument.venue] = asyncio.get_running_loop().call_later(
+                        self.catalog_miss_refresh_seconds, self._clear_retry, instrument.venue
+                    )
                     raise RequestError("venue market catalog failed") from exc
-                self.exchanges[instrument.venue] = exchange
-        return exchange, resolve_ccxt_symbol(exchange, instrument)
+                self._retain_catalog(instrument.venue, exchange)
+            return exchange, resolve_ccxt_symbol(exchange, instrument)
+
+    def _clear_retry(self, venue: str) -> None:
+        self._retry_after.pop(venue, None)
+        self._retry_expiry.pop(venue, None)
+
+    def _retain_catalog(self, venue: str, exchange: Any) -> None:
+        self.exchanges[venue] = exchange
+        self._loaded_at[venue] = time.monotonic()
+        self._catalog_sizes[venue] = _catalog_bytes(exchange)
+        loop = asyncio.get_running_loop()
+        self._expiry[venue] = loop.call_later(
+            self.catalog_ttl_seconds, self._discard_catalog, venue, exchange
+        )
+        for candidate in list(self.exchanges):
+            if (len(self.exchanges) <= self.catalog_max_entries
+                    and sum(self._catalog_sizes.values()) <= self.catalog_max_bytes):
+                break
+            retained = self.exchanges[candidate]
+            if candidate != venue and not self._users.get(id(retained)):
+                self._discard_catalog(candidate, retained)
+        if (len(self.exchanges) > self.catalog_max_entries
+                or sum(self._catalog_sizes.values()) > self.catalog_max_bytes):
+            # The caller borrows the loaded catalog before this callback runs.
+            # Oversized catalogs can serve the request without remaining cached.
+            loop.call_soon(self._discard_catalog, venue, exchange)
+
+    def _discard_catalog(self, venue: str, exchange: Any) -> None:
+        if self.exchanges.get(venue) is not exchange:
+            return
+        del self.exchanges[venue]
+        self._loaded_at.pop(venue, None)
+        self._catalog_sizes.pop(venue, None)
+        handle = self._expiry.pop(venue, None)
+        if handle is not None:
+            handle.cancel()
+        if self._users.get(id(exchange)):
+            self._retired[id(exchange)] = exchange
+        else:
+            self._close_exchange(exchange)
+
+    def _close_exchange(self, exchange: Any) -> None:
+        async def close():
+            try:
+                await exchange.close()
+            except Exception:
+                pass
+        task = asyncio.create_task(close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def _release_market(self, exchange: Any) -> None:
+        key = id(exchange)
+        remaining = self._users.get(key, 1) - 1
+        if remaining:
+            self._users[key] = remaining
+        else:
+            self._users.pop(key, None)
+            retired = self._retired.pop(key, None)
+            if retired is not None:
+                self._close_exchange(retired)
 
     def _runtime_exchange(self, instrument: Instrument) -> tuple[Any, bool]:
         exchange = self.exchanges.get(instrument.venue)
@@ -369,6 +479,29 @@ class CcxtAdapter:
     def _summary(exc: Exception) -> str:
         detail = str(exc).strip()
         return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def _catalog_bytes(exchange: Any) -> int:
+    """Count shared catalog objects once without serializing provider payloads."""
+    pending = [getattr(exchange, name, None) for name in (
+        "markets", "markets_by_id", "symbols", "ids", "currencies",
+        "currencies_by_id", "base_currencies", "quote_currencies",
+    )]
+    seen: set[int] = set()
+    total = 0
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(value)
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+    return total
 
 
 def resolve_ccxt_symbol(exchange: Any, instrument: Instrument) -> str:

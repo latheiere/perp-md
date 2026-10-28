@@ -3,6 +3,16 @@
 Notable changes to `perp-md` are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.4 - 2026-10-28
+
+- Refresh optional-provider market catalogs periodically and on unresolved
+  native identities with a per-venue minimum refresh interval, so long-lived
+  acquisition clients can resolve newly listed instruments.
+- Bound catalog retention by bytes and venue count; expire idle clients
+  without another request and defer client closure until active acquisition
+  finishes. Limit concurrent catalog loads without materializing serialized
+  copies for memory accounting.
+
 ## 0.5.3 - 2026-10-04
 
 - Expire successful HTTP responses after completion even when their request

@@ -355,6 +355,18 @@ removing a newer replacement. `HttpxTransport.invalidate_get` optionally lets
 an adapter discard a specific HTTP-success response rejected by the provider;
 custom transports with response caches should implement the same hook.
 
+Optional CCXT adapters retain market catalogs for at most fifteen minutes.
+An unresolved or ambiguous native identity can refresh an older catalog once
+per venue per minute; fresh missing or ambiguous identities still raise
+`DataUnavailable` and are never rewritten or inferred. Catalog loads are
+serialized per venue with at most two concurrent loads per adapter. Retention
+is bounded to sixteen catalogs and 64 MiB of shared catalog objects per
+adapter. Idle catalogs expire without further requests. Evicted clients close
+after their active requests finish; oversized catalogs serve acquisition
+without remaining cached. Client shutdown cancels expiry timers and closes
+idle clients. These limits do not change native observation values, source
+timestamps, or partial-history behavior.
+
 The nanosecond funding adapter parses integer timestamps without floating-point
 conversion and floors them to the containing millisecond. Sub-millisecond
 precision is valid; fractional nanoseconds, negative values, and lossy floating

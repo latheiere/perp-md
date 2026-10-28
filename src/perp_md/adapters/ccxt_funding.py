@@ -70,8 +70,10 @@ class CcxtFundingAdapter(CcxtAdapter):
         *,
         include_history: bool,
     ) -> FundingResult:
+        exchange = None
         try:
             exchange, symbol = await self._market(instrument)
+            self._users[id(exchange)] = self._users.get(id(exchange), 0) + 1
             has_current = bool(exchange.has.get("fetchFundingRate"))
             has_history = bool(exchange.has.get("fetchFundingRateHistory"))
             if not has_current and not has_history:
@@ -141,6 +143,9 @@ class CcxtFundingAdapter(CcxtAdapter):
             raise
         except Exception as exc:
             raise RequestError("optional provider funding request failed") from exc
+        finally:
+            if exchange is not None:
+                await self._release_market(exchange)
 
     @classmethod
     def _history_rows(
